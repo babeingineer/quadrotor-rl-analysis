@@ -1,0 +1,49 @@
+# ---- RL training outputs (large, regenerable) ----
+results/
+results_sac/
+results_fs/
+results_sac_fs/
+results_*/
+*.log
+
+# trained models / normalization stats / replay buffers
+*.zip
+*.pkl
+*.pt
+*.pth
+
+# generated figures (uncomment to keep; force-add specific ones with `git add -f`)
+comparison_*.png
+training_curve.png
+track_*.png
+
+# tensorboard
+tb/
+**/tb/
+runs/
+
+# ---- cloned third-party dependency (installed via pip; see README) ----
+gym-pybullet-drones/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+
+# virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# ---- editors / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
