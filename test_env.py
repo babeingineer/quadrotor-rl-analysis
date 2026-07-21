@@ -73,11 +73,28 @@ def test_saturation():
     env.close()
 
 
+def test_wind_observer():
+    print("\n=== disturbance observer recovers the true wind force (hover in steady wind) ===")
+    env = RateVelAviary(gui=False, episode_len_sec=100, mass_range=(10.0, 10.0),
+                        wind_max=0.0, motor_tau_range=(0.10, 0.10))
+    env.reset(seed=7)
+    env.wind = np.array([12.0, 0.0, 0.0])                 # known steady wind
+    for _ in range(120):                                   # let flight + EMA settle
+        env.step(np.zeros(4, dtype=np.float32))
+    v_rel = env.vel[0] - env.wind
+    true_f = -env.WIND_DRAG * np.linalg.norm(v_rel) * v_rel   # actual external force
+    est = env.wind_est
+    err = np.linalg.norm(est - true_f)
+    print(f"  true wind force {np.round(true_f,1)} N  |  estimate {np.round(est,1)} N  "
+          f"|  err {err:.1f} N  [{'OK' if err < 3.0 else 'FAIL'}]")
+    env.close()
+
+
 def test_api():
     print("\n=== Gym API / shapes / DR ranges ===")
     env = RateVelAviary(gui=False)
     obs, info = env.reset(seed=2)
-    assert obs.shape == (22,)
+    assert obs.shape == (29,), obs.shape
     masses = []
     ep = 0
     obs, _ = env.reset(seed=3)
@@ -86,7 +103,7 @@ def test_api():
         assert np.all(np.isfinite(obs)) and np.isfinite(r)
         if term or trunc:
             masses.append(info["mass"]); ep += 1; env.reset()
-    print(f"  obs (22,), 1200 steps, {ep} episodes, all finite")
+    print(f"  obs {obs.shape}, 1200 steps, {ep} episodes, all finite")
     print(f"  sampled masses in [{min(masses):.2f}, {max(masses):.2f}] kg  [OK]")
     env.close()
 
@@ -95,6 +112,7 @@ if __name__ == "__main__":
     test_api()
     test_hover()
     test_wind()
+    test_wind_observer()
     test_saturation()
     test_rate_tracking()
     print("\nDone.")

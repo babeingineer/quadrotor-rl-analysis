@@ -45,7 +45,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timesteps", type=int, default=3_000_000)
     ap.add_argument("--n-envs", type=int, default=6)
-    ap.add_argument("--n-stack", type=int, default=4, help="observation frames to stack")
+    ap.add_argument("--n-stack", type=int, default=1,
+                    help="observation frames to stack (1 = none; motor RPM + wind observer "
+                         "are fed directly, so stacking is redundant)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out-dir", type=str, default="results_fs")
     ap.add_argument("--no-subproc", action="store_true")

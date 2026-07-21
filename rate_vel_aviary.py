@@ -82,7 +82,10 @@ class RateVelAviary(BaseAviary):
         self.INT_LIMIT = float(int_limit)
 
         self.MAX_TOTAL_THRUST = 4.0 * self.MOTOR_MAX             # 160 N
-        self.NOMINAL_HOVER = 10.0 * 9.8                          # thrust at a_T=0 (nominal 10 kg)
+        self.NOMINAL_MASS = 10.0                                 # mass used by onboard estimator
+        self.NOMINAL_HOVER = self.NOMINAL_MASS * 9.8             # thrust at a_T=0 (nominal 10 kg)
+        self.MOTOR_MAX_RPM = 8000.0                              # for force<->RPM reporting (ESC units)
+        self.WIND_EST_ALPHA = 0.5                                # EMA filter on disturbance estimate
 
         if initial_xyzs is None:
             initial_xyzs = np.array([[0.0, 0.0, 2.0]])
@@ -98,6 +101,8 @@ class RateVelAviary(BaseAviary):
         self.motor_tau = 0.0                 # per-episode motor time constant (s)
         self.motor_alpha = 1.0               # per-substep smoothing = 1-exp(-dt/tau)
         self.motor_forces = np.zeros(4)      # actual (lagged) per-motor thrust (N)
+        self.prev_vel = np.zeros(3)          # velocity at previous step (for accel estimate)
+        self.wind_est = np.zeros(3)          # disturbance-observer wind force estimate (N, world)
 
         super().__init__(drone_model=DroneModel.CF2X,  # URDF only for body/visual; dynamics overridden
                          num_drones=1,
@@ -127,8 +132,9 @@ class RateVelAviary(BaseAviary):
         return spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
     def _observationSpace(self):
-        # [vel_err(3), target_vel(3), R(9), omega_body(3), last_action(4)] = 22
-        return spaces.Box(low=-np.inf, high=np.inf, shape=(22,), dtype=np.float32)
+        # [vel_err(3), target_vel(3), R(9), omega_body(3), last_action(4),
+        #  motor_rpm(4), wind_force_est(3)] = 29
+        return spaces.Box(low=-np.inf, high=np.inf, shape=(29,), dtype=np.float32)
 
     # ------------------------------------------------- reset / domain random.
     def _housekeeping(self):
@@ -157,6 +163,8 @@ class RateVelAviary(BaseAviary):
         self.motor_alpha = (1.0 if self.motor_tau <= 1e-6
                             else 1.0 - np.exp(-self.PYB_TIMESTEP / self.motor_tau))
         self.motor_forces = np.full(4, self.M * 9.8 / 4.0)   # start at hover equilibrium
+        self.prev_vel = np.zeros(3)
+        self.wind_est = np.zeros(3)
 
         self._resample_target()
 
@@ -220,6 +228,7 @@ class RateVelAviary(BaseAviary):
         physics sub-step (inner loop @ PYB_FREQ); apply achieved wrench + wind + gravity."""
         self.current_action = np.clip(np.asarray(action, dtype=float).reshape(4), -1.0, 1.0)
         thrust_des, omega_des = self._decode_action(self.current_action)
+        v_prev = self.vel[0].copy()                       # for the acceleration estimate
 
         for _ in range(self.PYB_STEPS_PER_CTRL):
             R, thrust, tau_body = self._control_wrench(thrust_des, omega_des)
@@ -227,6 +236,7 @@ class RateVelAviary(BaseAviary):
             p.stepSimulation(physicsClientId=self.CLIENT)
             self._updateAndStoreKinematicInformation()
 
+        self._update_wind_estimate(v_prev)               # disturbance observer
         obs = self._computeObs()
         reward = self._computeReward()
         terminated = self._computeTerminated()
@@ -236,17 +246,34 @@ class RateVelAviary(BaseAviary):
         self.prev_action = self.current_action.copy()
         return obs, reward, terminated, truncated, info
 
+    def _update_wind_estimate(self, v_prev):
+        """Disturbance observer: recover external (wind) force from the force balance
+        m*a = F_thrust + F_gravity + F_wind, using NOMINAL mass + achieved thrust (i.e.
+        exactly what an onboard estimator has). Target-independent -> transfers to
+        real-time changing targets. EMA-filtered."""
+        a = (self.vel[0] - v_prev) / self.CTRL_TIMESTEP          # finite-difference accel
+        R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
+        f_thrust = R[:, 2] * float(np.sum(self.motor_forces))    # achieved thrust, world
+        f_ext = (self.NOMINAL_MASS * a - f_thrust
+                 + np.array([0.0, 0.0, self.NOMINAL_MASS * self.G]))
+        self.wind_est = ((1 - self.WIND_EST_ALPHA) * self.wind_est
+                         + self.WIND_EST_ALPHA * f_ext)
+
     # ------------------------------------------------------------------- obs
     def _computeObs(self):
         R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
         omega_body = R.T @ self.ang_v[0]
         vel_err = self.target_vel - self.vel[0]
+        # motor RPM from actual (lagged) thrust, normalized to [0,1] (ESC telemetry)
+        rpm_norm = np.sqrt(np.clip(self.motor_forces / self.MOTOR_MAX, 0.0, 1.0))
         obs = np.concatenate([
             vel_err / self.MAX_SPEED,            # 3
             self.target_vel / self.MAX_SPEED,    # 3
             R.reshape(9),                         # 9
             omega_body / self.MAX_RATE[0],        # 3
             self.current_action,                  # 4
+            rpm_norm,                             # 4  <- solves motor delay
+            self.wind_est / self.NOMINAL_HOVER,   # 3  <- solves steady wind (target-independent)
         ])
         return obs.astype(np.float32)
 
@@ -286,4 +313,5 @@ class RateVelAviary(BaseAviary):
                 "mass": self.M,
                 "wind": self.wind.copy(),
                 "motor_tau": self.motor_tau,
+                "wind_est": self.wind_est.copy(),
                 "vel_error": float(np.linalg.norm(self.vel[0] - self.target_vel))}

@@ -43,11 +43,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timesteps", type=int, default=500_000)
     ap.add_argument("--n-envs", type=int, default=4)
-    ap.add_argument("--n-stack", type=int, default=4)
+    ap.add_argument("--n-stack", type=int, default=1,
+                    help="observation frames to stack (1 = none; motor RPM + wind observer "
+                         "are fed directly)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out-dir", type=str, default="results_sac_fs")
+    ap.add_argument("--out-dir", type=str, default="results_sac_obs")
     ap.add_argument("--no-subproc", action="store_true")
     ap.add_argument("--smoke", action="store_true")
+    # --- tunable SAC hyperparameters ---
+    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--net", type=str, default="128,128", help="comma-sep hidden sizes")
+    ap.add_argument("--tau", type=float, default=0.005)
+    ap.add_argument("--gradient-steps", type=int, default=-1, help="-1 => n_envs (ratio 1)")
+    ap.add_argument("--buffer-size", type=int, default=400_000)
+    ap.add_argument("--learning-starts", type=int, default=10_000)
+    ap.add_argument("--use-sde", action="store_true", help="gSDE exploration")
+    ap.add_argument("--tag", type=str, default="SAC")
     args = ap.parse_args()
 
     if args.smoke:
@@ -60,21 +72,25 @@ def main():
     eval_env, _ = build_stacked(1, args.seed + 999, not args.no_subproc,
                                 args.n_stack, training=False)
 
-    learning_starts = 5_000 if args.smoke else 10_000
+    learning_starts = 5_000 if args.smoke else args.learning_starts
+    grad_steps = args.n_envs if args.gradient_steps == -1 else args.gradient_steps
+    net_arch = [int(x) for x in args.net.split(",")]
+    print(f"[SAC] lr={args.lr} batch={args.batch_size} net={net_arch} tau={args.tau} "
+          f"grad_steps={grad_steps} buffer={args.buffer_size} sde={args.use_sde}")
     model = SAC(
         "MlpPolicy", train_env,
-        learning_rate=3e-4, buffer_size=400_000,   # 88-dim stacked obs -> keep buffer modest
-        learning_starts=learning_starts, batch_size=256,
-        tau=0.005, gamma=0.99,
-        train_freq=(1, "step"), gradient_steps=args.n_envs,
-        ent_coef="auto",
-        policy_kwargs=dict(net_arch=[128, 128]),
+        learning_rate=args.lr, buffer_size=args.buffer_size,
+        learning_starts=learning_starts, batch_size=args.batch_size,
+        tau=args.tau, gamma=0.99,
+        train_freq=(1, "step"), gradient_steps=grad_steps,
+        ent_coef="auto", use_sde=args.use_sde, sde_sample_freq=64 if args.use_sde else -1,
+        policy_kwargs=dict(net_arch=net_arch),
         tensorboard_log=os.path.join(args.out_dir, "tb"),
         seed=args.seed, verbose=1,
     )
 
     evalcb = ProgressPlotCallback(
-        eval_env, out_dir=args.out_dir, tag="SAC+FS",
+        eval_env, out_dir=args.out_dir, tag=args.tag,
         best_model_save_path=os.path.join(args.out_dir, "best"),
         log_path=os.path.join(args.out_dir, "eval"),
         eval_freq=max(50_000 // args.n_envs, 1),
