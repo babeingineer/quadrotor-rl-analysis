@@ -65,7 +65,11 @@ def metrics(p, g, dt):
 
 
 def main():
-    P, S = "results_obs", "results_pos"        # velocity-PPO+loop, position-PPO
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--vel-dir", default="results_obs")
+    ap.add_argument("--pos-dir", default="results_pos3b")
+    a = ap.parse_args()
+    P, S = a.vel_dir, a.pos_dir              # velocity-PPO+loop, position-PPO
     rows = []
 
     # ---- Test 1: HOVER hold (goal = start point) ----

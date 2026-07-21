@@ -317,9 +317,15 @@ class RateVelAviary(BaseAviary):
             # baseline gives a dense gradient across the whole range; a sharp Gaussian
             # adds terminal precision.
             reward = (np.clip(1.0 - dp / self.POS_RANGE, 0.0, 1.0)  # positive guidance + survival
-                      + np.exp(-0.5 * (dp / 1.5) ** 2)             # sharp precision peak at target
-                      - 0.02 * np.exp(-0.5 * dp ** 2) * speed       # brake near target (clean stop)
-                      - 0.01 * max(0.0, speed - self.SPEED_CAP) ** 2  # soft speed cap
+                      + 2.0 * np.exp(-0.5 * (dp / 1.0))            # exponential (sigma 1.0): non-zero
+                      #                                              slope at dp=0 (no flat deadband)
+                      #                                              AND reachable band (~2 m) so the
+                      #                                              policy actually collects it
+                      + 0.5 * np.exp(-0.5 * (dp / 0.25) ** 2)      # tiny bonus for pin-point (<0.25 m)
+                      # NOTE: no explicit brake / stopping-distance term — testing whether the
+                      # pure position reward alone learns not to overshoot (overshoot is
+                      # reward-suboptimal), given enough training.
+                      - 0.01 * max(0.0, speed - self.SPEED_CAP) ** 2  # soft speed cap (safety only)
                       + smooth)
         if self._crashed():
             reward -= 10.0
