@@ -312,10 +312,13 @@ class RateVelAviary(BaseAviary):
         else:  # position: reach target AND stop there; soft speed cap
             dp = np.linalg.norm(self.target_pos - self.pos[0])
             speed = np.linalg.norm(self.vel[0])
-            reward = (np.exp(-0.5 * (dp / 1.0) ** 2)          # sharp position peak
-                      + 0.5 * np.exp(-0.5 * (dp / 3.0) ** 2)  # broad basin
-                      - 0.05 * dp                              # far-field gradient
-                      - 0.02 * np.exp(-0.5 * dp ** 2) * speed  # brake near target (clean stop)
+            # NOTE: reward is kept NON-NEGATIVE while alive so the policy never prefers
+            # crashing (which terminates) over flying to a far target. A linear positive
+            # baseline gives a dense gradient across the whole range; a sharp Gaussian
+            # adds terminal precision.
+            reward = (np.clip(1.0 - dp / self.POS_RANGE, 0.0, 1.0)  # positive guidance + survival
+                      + np.exp(-0.5 * (dp / 1.5) ** 2)             # sharp precision peak at target
+                      - 0.02 * np.exp(-0.5 * dp ** 2) * speed       # brake near target (clean stop)
                       - 0.01 * max(0.0, speed - self.SPEED_CAP) ** 2  # soft speed cap
                       + smooth)
         if self._crashed():
