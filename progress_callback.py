@@ -46,34 +46,38 @@ class ProgressPlotCallback(EvalCallback):
     def _rollout_episode(self):
         venv = self.eval_env
         base = unwrap_base(venv)
+        task = getattr(base, "TASK", "velocity")
         obs = venv.reset()
-        target = base.target_vel.copy()
+        target = base.target_pos.copy() if task == "position" else base.target_vel.copy()
         mass, wind, dt = float(base.M), base.wind.copy(), base.CTRL_TIMESTEP
-        ts, vels, errs, done, t = [], [], [], False, 0.0
+        ts, sig, errs, done, t = [], [], [], False, 0.0
         while not done:
             action, _ = self.model.predict(obs, deterministic=True)
             obs, _, dones, infos = venv.step(action)
             done = bool(dones[0])
             if not done:
-                ts.append(t); vels.append(infos[0]["vel"]); errs.append(infos[0]["vel_error"])
-                t += dt
-        return np.array(ts), np.array(vels), np.array(errs), target, mass, wind
+                sig.append(infos[0]["pos"] if task == "position" else infos[0]["vel"])
+                errs.append(infos[0]["pos_error"] if task == "position" else infos[0]["vel_error"])
+                ts.append(t); t += dt
+        return np.array(ts), np.array(sig), np.array(errs), target, mass, wind, task
 
     def _save_track_plot(self, step):
-        ts, vels, errs, target, mass, wind = self._rollout_episode()
+        ts, sig, errs, target, mass, wind, task = self._rollout_episode()
         if len(ts) == 0:
             return
+        unit = "m" if task == "position" else "m/s"
+        comp = ["x", "y", "z"] if task == "position" else ["vx", "vy", "vz"]
         fig, axs = plt.subplots(4, 1, figsize=(8, 9), sharex=True)
-        for i, lab in enumerate(["vx", "vy", "vz"]):
-            axs[i].plot(ts, vels[:, i], color="C0", label=f"{lab} actual")
+        for i, lab in enumerate(comp):
+            axs[i].plot(ts, sig[:, i], color="C0", label=f"{lab} actual")
             axs[i].axhline(target[i], ls="--", color="k", label=f"{lab} target")
-            axs[i].set_ylabel("m/s"); axs[i].grid(alpha=0.3); axs[i].legend(loc="right", fontsize=8)
-        axs[3].plot(ts, errs, color="C3"); axs[3].set_ylabel("|v err| (m/s)")
+            axs[i].set_ylabel(unit); axs[i].grid(alpha=0.3); axs[i].legend(loc="right", fontsize=8)
+        axs[3].plot(ts, errs, color="C3"); axs[3].set_ylabel(f"err ({unit})")
         axs[3].set_xlabel("time (s)"); axs[3].grid(alpha=0.3)
         pfx = f"{self.tag} " if self.tag else ""
-        fig.suptitle(f"{pfx}step {step:,} | |target|={np.linalg.norm(target):.1f} m/s | "
-                     f"mass={mass:.1f} kg | |wind|={np.linalg.norm(wind):.1f} m/s | "
-                     f"steady err={errs[-int(len(errs)/4):].mean():.2f} m/s")
+        fig.suptitle(f"{pfx}step {step:,} | mass={mass:.1f} kg | "
+                     f"|wind|={np.linalg.norm(wind):.1f} m/s | "
+                     f"steady err={errs[-int(len(errs)/4):].mean():.2f} {unit}")
         fig.tight_layout()
         fig.savefig(os.path.join(self.progress_dir, f"track_{step:08d}.png"), dpi=110)
         fig.savefig(os.path.join(self.progress_dir, "latest_track.png"), dpi=110)

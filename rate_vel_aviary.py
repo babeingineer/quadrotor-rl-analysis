@@ -42,8 +42,11 @@ class RateVelAviary(BaseAviary):
                  gui: bool = False,
                  record: bool = False,
                  # --- task ---
+                 task: str = "velocity",      # "velocity" or "position"
                  episode_len_sec: float = 8.0,
                  max_speed: float = 20.0,
+                 pos_range: float = 30.0,     # position task: target radius (m); sets max cruise speed
+                 speed_cap: float = 18.0,     # position task: soft speed cap (m/s)
                  # --- airframe / domain randomization ---
                  mass_range=(9.0, 11.0),      # kg, sampled per episode
                  motor_max_thrust: float = 40.0,   # N per motor
@@ -66,8 +69,12 @@ class RateVelAviary(BaseAviary):
                  int_limit: float = 5.0,
                  ):
         # ---- config (must be set before super().__init__ -> _housekeeping) ----
+        assert task in ("velocity", "position"), task
+        self.TASK = task
         self.EPISODE_LEN_SEC = episode_len_sec
         self.MAX_SPEED = float(max_speed)
+        self.POS_RANGE = float(pos_range)
+        self.SPEED_CAP = float(speed_cap)
         self.MASS_RANGE = (float(mass_range[0]), float(mass_range[1]))
         self.MOTOR_MAX = float(motor_max_thrust)
         self.ARM = float(arm_length)
@@ -95,6 +102,7 @@ class RateVelAviary(BaseAviary):
         self.J_DIAG = self.J_NOMINAL.copy()
         self.wind = np.zeros(3)
         self.target_vel = np.zeros(3)
+        self.target_pos = np.zeros(3)        # position task
         self.rate_integral = np.zeros(3)
         self.current_action = np.zeros(4)
         self.prev_action = np.zeros(4)
@@ -176,7 +184,11 @@ class RateVelAviary(BaseAviary):
         d = self.np_random.normal(size=3)
         n = np.linalg.norm(d)
         d = d / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
-        self.target_vel = d * self.np_random.uniform(0.0, self.MAX_SPEED)
+        if self.TASK == "velocity":
+            self.target_vel = d * self.np_random.uniform(0.0, self.MAX_SPEED)
+        else:  # position: target within POS_RANGE of the current position (incl. near 0)
+            dist = self.np_random.uniform(0.0, self.POS_RANGE)
+            self.target_pos = self.pos[0] + d * dist
 
     # ------------------------------------------------------- CTBR decode + PID
     def _decode_action(self, action):
@@ -263,12 +275,20 @@ class RateVelAviary(BaseAviary):
     def _computeObs(self):
         R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
         omega_body = R.T @ self.ang_v[0]
-        vel_err = self.target_vel - self.vel[0]
         # motor RPM from actual (lagged) thrust, normalized to [0,1] (ESC telemetry)
         rpm_norm = np.sqrt(np.clip(self.motor_forces / self.MOTOR_MAX, 0.0, 1.0))
+        if self.TASK == "velocity":
+            first6 = np.concatenate([(self.target_vel - self.vel[0]) / self.MAX_SPEED,   # vel err
+                                     self.target_vel / self.MAX_SPEED])                   # target vel
+        else:  # position: relative position (clamped to range) + current velocity
+            rel = self.target_pos - self.pos[0]
+            n = np.linalg.norm(rel)
+            if n > self.POS_RANGE:                            # clamp to range (deployment carrot)
+                rel = rel * (self.POS_RANGE / n)
+            first6 = np.concatenate([rel / self.POS_RANGE,                                # rel pos
+                                     self.vel[0] / self.MAX_SPEED])                        # velocity
         obs = np.concatenate([
-            vel_err / self.MAX_SPEED,            # 3
-            self.target_vel / self.MAX_SPEED,    # 3
+            first6,                               # 6
             R.reshape(9),                         # 9
             omega_body / self.MAX_RATE[0],        # 3
             self.current_action,                  # 4
@@ -279,15 +299,25 @@ class RateVelAviary(BaseAviary):
 
     # ---------------------------------------------------------------- reward
     def _computeReward(self):
-        d = np.linalg.norm(self.vel[0] - self.target_vel)
         R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
         omega_body = R.T @ self.ang_v[0]
-        reward = (np.exp(-0.5 * (d / 2.0) ** 2)
-                  + 0.5 * np.exp(-0.5 * (d / 8.0) ** 2)
-                  - 0.02 * d
-                  - 5e-4 * float(omega_body @ omega_body)
+        smooth = (- 5e-4 * float(omega_body @ omega_body)
                   - 5e-4 * float((self.current_action - self.prev_action)
                                  @ (self.current_action - self.prev_action)))
+        if self.TASK == "velocity":
+            d = np.linalg.norm(self.vel[0] - self.target_vel)
+            reward = (np.exp(-0.5 * (d / 2.0) ** 2)
+                      + 0.5 * np.exp(-0.5 * (d / 8.0) ** 2)
+                      - 0.02 * d + smooth)
+        else:  # position: reach target AND stop there; soft speed cap
+            dp = np.linalg.norm(self.target_pos - self.pos[0])
+            speed = np.linalg.norm(self.vel[0])
+            reward = (np.exp(-0.5 * (dp / 1.0) ** 2)          # sharp position peak
+                      + 0.5 * np.exp(-0.5 * (dp / 3.0) ** 2)  # broad basin
+                      - 0.05 * dp                              # far-field gradient
+                      - 0.02 * np.exp(-0.5 * dp ** 2) * speed  # brake near target (clean stop)
+                      - 0.01 * max(0.0, speed - self.SPEED_CAP) ** 2  # soft speed cap
+                      + smooth)
         if self._crashed():
             reward -= 10.0
         return float(reward)
@@ -309,9 +339,12 @@ class RateVelAviary(BaseAviary):
 
     def _computeInfo(self):
         return {"target_vel": self.target_vel.copy(),
+                "target_pos": self.target_pos.copy(),
+                "pos": self.pos[0].copy(),
                 "vel": self.vel[0].copy(),
                 "mass": self.M,
                 "wind": self.wind.copy(),
                 "motor_tau": self.motor_tau,
                 "wind_est": self.wind_est.copy(),
-                "vel_error": float(np.linalg.norm(self.vel[0] - self.target_vel))}
+                "vel_error": float(np.linalg.norm(self.vel[0] - self.target_vel)),
+                "pos_error": float(np.linalg.norm(self.pos[0] - self.target_pos))}

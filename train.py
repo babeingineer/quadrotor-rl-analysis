@@ -24,16 +24,12 @@ from rate_vel_aviary import RateVelAviary
 from progress_callback import ProgressPlotCallback
 
 
-def make_env_kwargs():
-    return dict(episode_len_sec=8.0, max_speed=20.0)
-
-
-def build_stacked(n_envs, seed, subproc, n_stack, norm_reward, training):
+def build_stacked(n_envs, seed, subproc, n_stack, norm_reward, training, env_kwargs):
     """VecNormalize(VecFrameStack(vec env)) — norm OUTSIDE stack so off-policy
     get_original_obs() returns the stacked obs. Returns (env, vecnormalize_handle)."""
     cls = SubprocVecEnv if (subproc and n_envs > 1) else DummyVecEnv
     venv = make_vec_env(RateVelAviary, n_envs=n_envs, seed=seed,
-                        env_kwargs=make_env_kwargs(), vec_env_cls=cls)
+                        env_kwargs=env_kwargs, vec_env_cls=cls)
     if n_stack > 1:
         venv = VecFrameStack(venv, n_stack=n_stack)
     env = VecNormalize(venv, norm_obs=True, norm_reward=norm_reward,
@@ -50,6 +46,10 @@ def main():
                          "are fed directly, so stacking is redundant)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out-dir", type=str, default="results_fs")
+    ap.add_argument("--task", type=str, default="velocity", choices=["velocity", "position"])
+    ap.add_argument("--pos-range", type=float, default=30.0,
+                    help="position task: target radius (m). Sets max cruise speed ~sqrt(a*R).")
+    ap.add_argument("--speed-cap", type=float, default=18.0, help="position task: soft speed cap (m/s)")
     ap.add_argument("--no-subproc", action="store_true")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
@@ -57,12 +57,16 @@ def main():
     if args.smoke:
         args.timesteps, args.n_envs = 20_000, 2
     os.makedirs(args.out_dir, exist_ok=True)
-    json.dump({"n_stack": args.n_stack}, open(os.path.join(args.out_dir, "config.json"), "w"))
+    json.dump({"n_stack": args.n_stack, "task": args.task,
+               "pos_range": args.pos_range, "speed_cap": args.speed_cap},
+              open(os.path.join(args.out_dir, "config.json"), "w"))
 
+    env_kwargs = dict(task=args.task, episode_len_sec=8.0, max_speed=20.0,
+                      pos_range=args.pos_range, speed_cap=args.speed_cap)
     train_env, train_norm = build_stacked(args.n_envs, args.seed, not args.no_subproc,
-                                          args.n_stack, norm_reward=True, training=True)
+                                          args.n_stack, True, True, env_kwargs)
     eval_env, _ = build_stacked(1, args.seed + 999, not args.no_subproc,
-                                args.n_stack, norm_reward=False, training=False)
+                                args.n_stack, False, False, env_kwargs)
 
     model = PPO(
         "MlpPolicy", train_env,
@@ -78,7 +82,7 @@ def main():
                               save_path=os.path.join(args.out_dir, "ckpts"),
                               name_prefix="ppo_ratevel")
     evalcb = ProgressPlotCallback(
-        eval_env, out_dir=args.out_dir, tag="PPO+FS",
+        eval_env, out_dir=args.out_dir, tag=f"PPO-{args.task}",
         best_model_save_path=os.path.join(args.out_dir, "best"),
         log_path=os.path.join(args.out_dir, "eval"),
         eval_freq=max(50_000 // args.n_envs, 1),

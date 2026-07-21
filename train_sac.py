@@ -41,7 +41,7 @@ def build_stacked(n_envs, seed, subproc, n_stack, training):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--timesteps", type=int, default=500_000)
+    ap.add_argument("--timesteps", type=int, default=800_000)
     ap.add_argument("--n-envs", type=int, default=4)
     ap.add_argument("--n-stack", type=int, default=1,
                     help="observation frames to stack (1 = none; motor RPM + wind observer "
@@ -50,15 +50,17 @@ def main():
     ap.add_argument("--out-dir", type=str, default="results_sac_obs")
     ap.add_argument("--no-subproc", action="store_true")
     ap.add_argument("--smoke", action="store_true")
-    # --- tunable SAC hyperparameters ---
-    ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--batch-size", type=int, default=256)
-    ap.add_argument("--net", type=str, default="128,128", help="comma-sep hidden sizes")
+    # --- tuned SAC hyperparameters (defaults = the config that beat untuned SAC:
+    #     1.48 vs 4.09 m/s err, 2% vs 18% crash) ---
+    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--batch-size", type=int, default=512)
+    ap.add_argument("--net", type=str, default="256,256", help="comma-sep hidden sizes")
     ap.add_argument("--tau", type=float, default=0.005)
-    ap.add_argument("--gradient-steps", type=int, default=-1, help="-1 => n_envs (ratio 1)")
-    ap.add_argument("--buffer-size", type=int, default=400_000)
-    ap.add_argument("--learning-starts", type=int, default=10_000)
-    ap.add_argument("--use-sde", action="store_true", help="gSDE exploration")
+    ap.add_argument("--gradient-steps", type=int, default=2, help="-1 => n_envs (ratio 1)")
+    ap.add_argument("--buffer-size", type=int, default=600_000)
+    ap.add_argument("--learning-starts", type=int, default=15_000)
+    ap.add_argument("--no-sde", dest="use_sde", action="store_false", help="disable gSDE")
+    ap.set_defaults(use_sde=True)                        # gSDE on by default (tuned)
     ap.add_argument("--tag", type=str, default="SAC")
     args = ap.parse_args()
 
