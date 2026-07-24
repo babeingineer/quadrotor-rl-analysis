@@ -11,8 +11,10 @@ from rate_vel_aviary import RateVelAviary
 from progress_callback import unwrap_base
 
 def load(D, ep=15.0):
-    json.load(open(f"{D}/config.json"))
-    venv = DummyVecEnv([lambda: RateVelAviary(task="velocity", episode_len_sec=ep, max_speed=80.0)])
+    cfg = json.load(open(f"{D}/config.json"))
+    ui = cfg.get("use_integral", False)
+    venv = DummyVecEnv([lambda: RateVelAviary(task="velocity", episode_len_sec=ep, max_speed=80.0,
+                                              use_vel_integral=ui)])
     venv = VecNormalize.load(f"{D}/vecnormalize.pkl", venv)
     venv.training = False; venv.norm_reward = False
     return PPO.load(f"{D}/best/best_model.zip"), venv, unwrap_base(venv)

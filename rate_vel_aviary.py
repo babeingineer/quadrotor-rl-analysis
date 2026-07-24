@@ -69,6 +69,15 @@ class RateVelAviary(BaseAviary):
                  inertia_nominal=(0.06, 0.03, 0.06),  # kg m^2 at NOMINAL_MASS (scales w/ mass)
                  # --- exploration: start in varied states (teach inversion/dive + high-speed) ---
                  randomize_init: bool = False,  # 50% random attitude (incl. inverted) + random vel
+                 hard_corner_frac: float = 0.0,  # fraction of TRAINING targets oversampled at the
+                 #                                 weak corners (high-speed + downward-biased). 0 =
+                 #                                 uniform (use for eval so the metric stays comparable)
+                 use_vel_integral: bool = False,  # add a leaky+clamped velocity-error integral to obs
+                 integral_tau: float = 3.0,       # leak time constant (s): anti-windup + forgets old
+                 #                                  setpoint transients so it works with changing targets
+                 dive_curriculum: bool = False,   # TRAINING: oversample downward dives whose steepness
+                 #                                  and speed ramp with self.dive_level (set by callback)
+                 dive_frac: float = 0.3,          # fraction of targets drawn from the dive curriculum
                  # --- wind ---
                  wind_max: float = 20.0,      # m/s
                  # --- fixed-wing aerodynamics (flat plate; no control surfaces) ---
@@ -102,6 +111,13 @@ class RateVelAviary(BaseAviary):
         self.YAW_RATIO = float(yaw_ratio)
         self.J_NOMINAL = np.array(inertia_nominal, dtype=float)   # at NOMINAL_MASS
         self.RANDOMIZE_INIT = bool(randomize_init)
+        self.HARD_CORNER_FRAC = float(hard_corner_frac)
+        self.USE_VEL_INTEGRAL = bool(use_vel_integral)
+        self.INTEGRAL_TAU = float(integral_tau)
+        self.vel_integral = np.zeros(3)          # leaky velocity-error integral (obs feature)
+        self.DIVE_CURRICULUM = bool(dive_curriculum)
+        self.DIVE_FRAC = float(dive_frac)
+        self.dive_level = 1.0                    # 0=shallow/slow dives .. 1=steep/fast (callback ramps)
         self.WIND_MAX = float(wind_max)
         self.MOTOR_TAU_RANGE = (float(motor_tau_range[0]), float(motor_tau_range[1]))
         self.MAX_RATE = np.array([max_rate_rp, max_rate_rp, max_rate_yaw], dtype=float)
@@ -170,7 +186,9 @@ class RateVelAviary(BaseAviary):
     def _observationSpace(self):
         # [vel_err(3), target_vel(3), R(9), omega_body(3), last_action(4),
         #  motor_rpm(4), ext_force_est(3), pitot_airspeed(1)] = 30
-        return spaces.Box(low=-np.inf, high=np.inf, shape=(30,), dtype=np.float32)
+        # (+ vel_err_integral(3) = 33 when use_vel_integral)
+        dim = 33 if self.USE_VEL_INTEGRAL else 30
+        return spaces.Box(low=-np.inf, high=np.inf, shape=(dim,), dtype=np.float32)
 
     # ------------------------------------------------- reset / domain random.
     def _housekeeping(self):
@@ -205,6 +223,7 @@ class RateVelAviary(BaseAviary):
         self.motor_forces = np.full(4, self.M * 9.8 / 4.0)   # start at hover equilibrium
         self.prev_vel = np.zeros(3)
         self.wind_est = np.zeros(3)
+        self.vel_integral = np.zeros(3)                      # reset integral each episode
 
         # --- randomize initial state (attitude incl. inverted + velocity) so the policy
         # explores inversion/dive and high-speed regimes it never reaches from a level hover.
@@ -217,8 +236,14 @@ class RateVelAviary(BaseAviary):
                 q = self.np_random.normal(size=4); quat = q / np.linalg.norm(q)  # uniform SO(3)
             v = np.zeros(3)
             if self.np_random.uniform() < 0.5:
-                dv = self.np_random.normal(size=3); dv /= (np.linalg.norm(dv) + 1e-9)
-                v = dv * self.np_random.uniform(0.0, self.MAX_SPEED)
+                dv = self.np_random.normal(size=3)
+                if self._sample_hard_corner():                   # start already diving fast
+                    dv[2] = -abs(dv[2]) - self.np_random.uniform(0.0, 1.0)
+                    dv /= (np.linalg.norm(dv) + 1e-9)
+                    v = dv * self.np_random.uniform(0.5, 1.0) * self.MAX_SPEED
+                else:
+                    dv /= (np.linalg.norm(dv) + 1e-9)
+                    v = dv * self.np_random.uniform(0.0, self.MAX_SPEED)
             w = self.np_random.uniform(-2.0, 2.0, size=3)        # small random body rates
             p.resetBasePositionAndOrientation(did, self.pos[0].tolist(), quat.tolist(),
                                               physicsClientId=self.CLIENT)
@@ -232,12 +257,42 @@ class RateVelAviary(BaseAviary):
         p.setCollisionFilterPair(int(self.PLANE_ID), int(self.DRONE_IDS[0]),
                                  -1, -1, enableCollision=0, physicsClientId=self.CLIENT)
 
+    def set_dive_level(self, level):
+        """Curriculum knob (set by callback via env_method): 0=shallow/slow, 1=steep/fast dives."""
+        self.dive_level = float(np.clip(level, 0.0, 1.0))
+
+    def _sample_hard_corner(self):
+        """True if this episode's target should be oversampled at a weak corner."""
+        return self.HARD_CORNER_FRAC > 0.0 and self.np_random.uniform() < self.HARD_CORNER_FRAC
+
+    def _sample_curriculum_dive(self):
+        """Downward target whose dive angle (10deg->90deg below horizontal) and speed both ramp
+        with dive_level, so the policy learns to commit to dives progressively."""
+        elev = np.radians(10.0 + 80.0 * self.dive_level) * self.np_random.uniform(0.3, 1.0)
+        az = self.np_random.uniform(0.0, 2.0 * np.pi)
+        d = np.array([np.cos(elev) * np.cos(az), np.cos(elev) * np.sin(az), -np.sin(elev)])
+        speed = self.np_random.uniform(0.3, 1.0) * (40.0 + 40.0 * self.dive_level)
+        return d * speed
+
     def _resample_target(self):
         d = self.np_random.normal(size=3)
         n = np.linalg.norm(d)
         d = d / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
         if self.TASK == "velocity":
-            self.target_vel = d * self.np_random.uniform(0.0, self.MAX_SPEED)
+            if self.DIVE_CURRICULUM and self.np_random.uniform() < self.DIVE_FRAC:
+                self.target_vel = self._sample_curriculum_dive()
+            elif self._sample_hard_corner():
+                # weak corners (measured): high-speed, and 60% downward-biased. Diving and
+                # high-speed-into-wind are physically feasible but rare under uniform sampling,
+                # so PPO under-trains them; oversampling here gives them gradient. Eval stays
+                # uniform (HARD_CORNER_FRAC=0), so this only reshapes training.
+                d = self.np_random.normal(size=3)
+                if self.np_random.uniform() < 0.6:
+                    d[2] = -abs(d[2]) - self.np_random.uniform(0.0, 1.0)   # push downward
+                d = d / (np.linalg.norm(d) + 1e-9)
+                self.target_vel = d * self.np_random.uniform(0.5, 1.0) * self.MAX_SPEED
+            else:
+                self.target_vel = d * self.np_random.uniform(0.0, self.MAX_SPEED)
         else:  # position: target within POS_RANGE of the current position (incl. near 0)
             dist = self.np_random.uniform(0.0, self.POS_RANGE)
             self.target_pos = self.pos[0] + d * dist
@@ -323,6 +378,12 @@ class RateVelAviary(BaseAviary):
             self._updateAndStoreKinematicInformation()
 
         self._update_wind_estimate(v_prev)               # disturbance observer
+        if self.USE_VEL_INTEGRAL and self.TASK == "velocity":
+            # leaky, clamped velocity-error integral (anti-windup). dI/dt = err - I/tau, so
+            # a constant error settles at I=err*tau and old setpoint transients decay away.
+            err = self.target_vel - self.vel[0]
+            self.vel_integral += (err - self.vel_integral / self.INTEGRAL_TAU) * self.CTRL_TIMESTEP
+            self.vel_integral = np.clip(self.vel_integral, -self.MAX_SPEED, self.MAX_SPEED)
         obs = self._computeObs()
         reward = self._computeReward()
         terminated = self._computeTerminated()
@@ -377,6 +438,8 @@ class RateVelAviary(BaseAviary):
             self.wind_est / self.NOMINAL_HOVER,   # 3  <- external force (wind + wing aero)
             [pitot / self.MAX_SPEED],             # 1  <- forward airspeed (drives the wings)
         ])
+        if self.USE_VEL_INTEGRAL:
+            obs = np.concatenate([obs, self.vel_integral / self.MAX_SPEED])  # 3  <- steady-state nulling
         return obs.astype(np.float32)
 
     # ---------------------------------------------------------------- reward

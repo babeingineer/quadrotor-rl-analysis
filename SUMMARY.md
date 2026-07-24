@@ -325,3 +325,29 @@ python eval.py --out-dir results_obs --gui --episodes 3
 | `test_env.py` | Env sanity checks |
 | `gen_summary_figs.py` | Figures for this document |
 | `gen_all_inference_figs.py` | Hover + circle inference across all 9 runnable models (`fig_all_*.png`) |
+| `eval_ts.py` | Tailsitter velocity-tracking eval (band + direction breakdown, tracking figure) |
+
+---
+
+## 10. Tailsitter VTOL extension (velocity tracking)
+
+The env was later converted from the heavy quad to a **quadrotor tailsitter VTOL** (2–5 kg,
+4×40 N, **2 fixed wings** with a flat-plate lift/drag model, no control surfaces — it must pitch
+~90° to fly forward on the wings). Task: track a random 3-D target velocity, **0–80 m/s
+omnidirectional**. Full detail — every run, reward, ablation — is in [`TAILSITTER.md`](TAILSITTER.md).
+
+**Arc:** aggregate steady-state speed error **~9.6 → 4.8 m/s**, **0% crashes**, full envelope.
+The breakthrough was a **leaky velocity-error integrator in the observation** (8.1 → 4.8) — the
+classical outer-loop-PID trick, which also acted as a "stuck-below-target" detector. More
+training, DR removal, hard-corner oversampling, and a dive curriculum all **failed** to move the
+plateau. Final policy (`results_tsI2`/`tsI3`): **hover 0.5 m/s, everyday tracking 2.4 m/s,
+up/level high-speed 95–99% reach, wing-borne cruise to 80 m/s, learned dives**; residual
+concentrated in the extreme **dive-into-wind** corner (a crosswind-sensing + near-limit issue).
+
+```bash
+# tailsitter velocity task (baseline -> +bigger net & random-init -> +integrator, via continuation)
+python train.py --timesteps 8000000 --n-envs 6 --use-integral --out-dir results_tsI
+python continue_train.py --src results_tsI  --out results_tsI2 --extra 4000000     # -> 12M
+python continue_train.py --src results_tsI2 --out results_tsI3 --extra 4000000     # -> 16M
+python eval_ts.py                                                                  # band + figure
+```

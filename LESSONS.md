@@ -432,3 +432,50 @@ makes no sense:**
 4. **Be willing to be wrong fast.** I called a "fundamental floor" that was just under-training,
    and proposed a penalty that wasn't needed. Cheap experiments (continue-training, fixed-seed
    eval) settled each question in one run instead of an argument.
+
+---
+
+## 10. Tailsitter VTOL extension (see [`TAILSITTER.md`](TAILSITTER.md) for full detail)
+
+The env was converted to a **tailsitter VTOL** (2–5 kg, fixed wings, flat-plate aero, must pitch
+~90° to cruise) tracking a **0–80 m/s omnidirectional** velocity. Aggregate error went
+**~9.6 → 4.8 m/s**. New, sometimes surprising, generalizable lessons:
+
+1. **A classical control feature (integral action) can out-perform every RL distribution trick.**
+   A single **leaky, clamped velocity-error integrator** added to the observation dropped the
+   aggregate **8.1 → 4.8** — after more-training, DR-removal, hard-corner sampling all stalled.
+   Two mechanisms: (a) it nulls steady-state error under unknown *constant* disturbances (wind,
+   mass mismatch) without needing to infer them; (b) a *persistent* error winds it into a growing
+   "**I'm stuck below target**" signal that let the policy escape a maneuver plateau. Lesson: when
+   the residual is steady-state disturbance rejection under partial observability, reach for the
+   control-theory tool, not another reward.
+2. **The "integrator breaks with changing setpoints" worry is overstated.** Standard outer-loop
+   velocity PIDs use exactly this, with **anti-windup (leak/clamp) + feedforward** — and the RL
+   policy learns its own feedforward since the target is in the obs. The disturbance observer is
+   still cleaner for *fast-changing* targets (no accumulation lag), but the two are complementary,
+   not either/or — real autopilots run both. (This refines quad-lesson §7-2.)
+3. **"Precision vs coverage" looked like a trade-off but was undertraining.** At 4 M the big net
+   couldn't do tight hover *and* dives; by 8–12 M it did **all bands together**. Capacity wasn't
+   binding — steps were. Don't diagnose a capacity/architecture problem from an undertrained run.
+4. **Diagnose the residual, then pick the lever — don't spray levers.** A DR ablation (no-DR ≈
+   full-DR ⇒ observation adequate except **crosswind**) + a reach-vs-oscillation decomposition +
+   an analytic feasibility check (dive terminal 126 m/s; 80-into-20-wind = 122/160 N) together
+   predicted, correctly, that hard-corner sampling and a dive curriculum would **fail** on the
+   corner (it's a sensing / near-limit issue, not a wrong optimization path), and that a
+   steady-state/sensing lever (integrator; a 3-axis airspeed probe) was the right target.
+5. **Curriculum only helps a *path* problem.** The dive curriculum (shallow→steep, ramped) did
+   nothing for the dive corner because that corner isn't a reachable-but-unexplored optimum — it's
+   limited by crosswind observability (axial-only pitot) and thrust margin. Curriculum reshapes
+   the path; it can't manufacture missing sensing or thrust.
+6. **Structural change resets the plateau, then training re-saturates.** Every real improvement
+   (256-net+random-init, then the integrator) dropped the error to a new floor that ~4 M more
+   steps then flattened against. Expect step-changes from *structure*, diminishing returns from
+   *more of the same*.
+7. **One variable at a time, or the result is uninterpretable.** `ts2` changed reward + episode
+   length + steps at once and taught nothing; the clean single-variable `tsI` run is what proved
+   the integrator. Continuations that stacked a second lever (`ts3d`, `tsIc`) gave misleading or
+   null deltas.
+8. **Ground the spec in physics.** Deriving MAX_SPEED from a force balance showed the 50–80 m/s
+   band trains against optimistic constant thrust (real prop limit ~50), and that the dive/
+   into-wind residuals are *feasible* (learnable), not physical walls — sending effort to sensing
+   rather than chasing an impossible target.

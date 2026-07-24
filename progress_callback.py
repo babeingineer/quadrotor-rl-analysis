@@ -8,7 +8,30 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
+
+
+class DiveCurriculumCallback(BaseCallback):
+    """Ramp the env's dive_level 0->1 over `ramp_steps` (measured from where training resumes),
+    then hold at 1. Pushes downward-dive targets from shallow/slow to steep/fast as the policy
+    gets competent, so it learns to commit to dives progressively."""
+    def __init__(self, ramp_steps, verbose=0):
+        super().__init__(verbose)
+        self.ramp_steps = ramp_steps
+        self.start = None
+
+    def _on_training_start(self):
+        self.start = self.model.num_timesteps
+        self.training_env.env_method("set_dive_level", 0.0)
+
+    def _on_step(self):
+        return True
+
+    def _on_rollout_start(self):
+        level = min(1.0, (self.model.num_timesteps - self.start) / max(1, self.ramp_steps))
+        self.training_env.env_method("set_dive_level", level)
+        if self.verbose:
+            print(f"[dive-curriculum] step {self.model.num_timesteps:,} dive_level={level:.2f}")
 
 
 def unwrap_base(venv):

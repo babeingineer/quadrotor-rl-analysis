@@ -50,6 +50,10 @@ def main():
     ap.add_argument("--pos-range", type=float, default=30.0,
                     help="position task: target radius (m). Sets max cruise speed ~sqrt(a*R).")
     ap.add_argument("--speed-cap", type=float, default=18.0, help="position task: soft speed cap (m/s)")
+    ap.add_argument("--hard-corner", type=float, default=0.0,
+                    help="fraction of training targets oversampled at weak corners (0 = uniform)")
+    ap.add_argument("--use-integral", action="store_true",
+                    help="add a leaky+clamped velocity-error integral to the observation")
     ap.add_argument("--no-subproc", action="store_true")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
@@ -58,13 +62,17 @@ def main():
         args.timesteps, args.n_envs = 20_000, 2
     os.makedirs(args.out_dir, exist_ok=True)
     json.dump({"n_stack": args.n_stack, "task": args.task,
-               "pos_range": args.pos_range, "speed_cap": args.speed_cap},
+               "pos_range": args.pos_range, "speed_cap": args.speed_cap,
+               "use_integral": args.use_integral},
               open(os.path.join(args.out_dir, "config.json"), "w"))
 
     base_kwargs = dict(task=args.task, episode_len_sec=8.0, max_speed=80.0,
                        pos_range=args.pos_range, speed_cap=args.speed_cap)
-    train_kwargs = dict(base_kwargs, randomize_init=True)    # explore inversion/dive/high-speed
-    eval_kwargs = dict(base_kwargs, randomize_init=False)    # standard hover start -> comparable metric
+    # use_vel_integral must match on train+eval (obs dim); hard_corner only shapes training
+    train_kwargs = dict(base_kwargs, randomize_init=True, hard_corner_frac=args.hard_corner,
+                        use_vel_integral=args.use_integral)
+    eval_kwargs = dict(base_kwargs, randomize_init=False, hard_corner_frac=0.0,
+                       use_vel_integral=args.use_integral)
     train_env, train_norm = build_stacked(args.n_envs, args.seed, not args.no_subproc,
                                           args.n_stack, True, True, train_kwargs)
     eval_env, _ = build_stacked(1, args.seed + 999, not args.no_subproc,
