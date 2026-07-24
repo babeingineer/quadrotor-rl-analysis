@@ -11,6 +11,7 @@ results_*/
 *.pkl
 *.pt
 *.pth
+*.txt
 
 # generated figures (uncomment to keep; force-add specific ones with `git add -f`)
 comparison_*.png

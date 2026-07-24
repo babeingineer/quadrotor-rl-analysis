@@ -22,20 +22,22 @@ def main():
 
     cfg = json.load(open(os.path.join(args.src, "config.json")))
     assert cfg.get("n_stack", 1) == 1
-    ekw = dict(task=cfg.get("task", "velocity"), episode_len_sec=8.0, max_speed=20.0,
-               pos_range=cfg.get("pos_range", 30.0), speed_cap=cfg.get("speed_cap", 18.0))
+    base_kwargs = dict(task=cfg.get("task", "velocity"), episode_len_sec=8.0, max_speed=80.0,
+                       pos_range=cfg.get("pos_range", 30.0), speed_cap=cfg.get("speed_cap", 18.0))
+    train_kwargs = dict(base_kwargs, randomize_init=True)    # keep exploring dive/cruise regimes
+    eval_kwargs = dict(base_kwargs, randomize_init=False)    # standard hover start -> comparable metric
     os.makedirs(args.out, exist_ok=True)
     json.dump(cfg, open(os.path.join(args.out, "config.json"), "w"))
 
-    def norm_env(n, seed, train, nr):
+    def norm_env(n, seed, train, nr, ekw):
         v = make_vec_env(RateVelAviary, n_envs=n, seed=seed, env_kwargs=ekw,
                          vec_env_cls=SubprocVecEnv if n > 1 else DummyVecEnv)
         v = VecNormalize.load(os.path.join(args.src, "vecnormalize.pkl"), v)
         v.training = train; v.norm_reward = nr
         return v
 
-    train_env = norm_env(args.n_envs, 0, True, True)
-    eval_env = norm_env(1, 999, False, False)
+    train_env = norm_env(args.n_envs, 0, True, True, train_kwargs)
+    eval_env = norm_env(1, 999, False, False, eval_kwargs)
 
     model = PPO.load(os.path.join(args.src, "ppo_ratevel_final.zip"), env=train_env)
     print(f"[RESUME] loaded {args.src} at {model.num_timesteps:,} steps; training +{args.extra:,}")
@@ -43,7 +45,7 @@ def main():
     ckpt = CheckpointCallback(save_freq=max(100_000 // args.n_envs, 1),
                               save_path=os.path.join(args.out, "ckpts"), name_prefix="ppo_ratevel")
     evalcb = ProgressPlotCallback(
-        eval_env, out_dir=args.out, tag=f"PPO-{ekw['task']}(cont)",
+        eval_env, out_dir=args.out, tag=f"PPO-{cfg.get('task', 'velocity')}(cont)",
         best_model_save_path=os.path.join(args.out, "best"),
         log_path=os.path.join(args.out, "eval"),
         eval_freq=max(50_000 // args.n_envs, 1),

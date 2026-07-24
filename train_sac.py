@@ -24,7 +24,7 @@ from progress_callback import ProgressPlotCallback
 
 
 def make_env_kwargs():
-    return dict(episode_len_sec=8.0, max_speed=20.0)
+    return dict(episode_len_sec=8.0, max_speed=80.0)
 
 
 def build_stacked(n_envs, seed, subproc, n_stack, training):

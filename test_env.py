@@ -1,5 +1,6 @@
-"""Sanity checks for RateVelAviary (heavy quad + wind + mass DR):
-inner-loop rate tracking (sign+convergence), hover thrust, wind effect, Gym API."""
+"""Sanity checks for RateVelAviary (tailsitter VTOL + wing aero + wind + mass DR):
+inner-loop rate tracking (sign+convergence), hover thrust, wind effect, wing aero,
+disturbance observer, Gym API."""
 import numpy as np
 import pybullet as p
 from rate_vel_aviary import RateVelAviary
@@ -15,7 +16,7 @@ def test_rate_tracking():
     axes = [("roll(p)", 1, 4.0), ("pitch(q)", 2, 4.0), ("yaw(r)", 3, 2.0)]
     for name, idx, expected in axes:
         for a_val, tag in [(+1.0, "+"), (-1.0, "-")]:
-            env = RateVelAviary(gui=False, episode_len_sec=100, mass_range=(10.0, 10.0),
+            env = RateVelAviary(gui=False, episode_len_sec=100, mass_range=(3.5, 3.5),
                                 wind_max=0.0, motor_tau_range=(0.25, 0.25))  # worst case
             env.reset(seed=0)
             action = np.zeros(4, dtype=np.float32)      # a_T=0 -> nominal hover thrust
@@ -35,9 +36,9 @@ def test_rate_tracking():
 
 
 def test_hover():
-    print("\n=== hover thrust (a_T=0, mass=10) holds altitude, no wind ===")
+    print("\n=== hover thrust (a_T=0, mass=3.5=nominal) holds altitude, no wind ===")
     env = RateVelAviary(gui=False, episode_len_sec=100,
-                        mass_range=(10.0, 10.0), wind_max=0.0)
+                        mass_range=(3.5, 3.5), wind_max=0.0)
     env.reset(seed=1)
     z0 = env.pos[0, 2]
     for _ in range(100):                                  # 2 s
@@ -52,7 +53,7 @@ def test_wind():
     print("\n=== wind pushes an uncontrolled-attitude drone downwind ===")
     # hold level attitude + hover thrust; a steady +x wind should drive vx toward +.
     env = RateVelAviary(gui=False, episode_len_sec=100,
-                        mass_range=(10.0, 10.0), wind_max=0.0)
+                        mass_range=(3.5, 3.5), wind_max=0.0)
     env.reset(seed=2)
     env.wind = np.array([15.0, 0.0, 0.0])                 # force a known wind
     for _ in range(100):                                  # 2 s
@@ -64,7 +65,7 @@ def test_wind():
 
 def test_saturation():
     print("\n=== motor saturation: total thrust never exceeds 4*40 N ===")
-    env = RateVelAviary(gui=False, episode_len_sec=100, mass_range=(11.0, 11.0))
+    env = RateVelAviary(gui=False, episode_len_sec=100, mass_range=(5.0, 5.0))
     env.reset(seed=4)
     # command max thrust + max roll rate simultaneously
     _, T, tau = env._control_wrench(1e9, np.array([1e3, 0.0, 0.0]))
@@ -74,19 +75,21 @@ def test_saturation():
 
 
 def test_wind_observer():
-    print("\n=== disturbance observer recovers the true wind force (hover in steady wind) ===")
-    env = RateVelAviary(gui=False, episode_len_sec=100, mass_range=(10.0, 10.0),
+    print("\n=== disturbance observer recovers the true external force (hover in steady wind) ===")
+    # F_ext now = wing aero (driven by wind through air-relative velocity); observer should
+    # track it using only measured accel + achieved thrust (no knowledge of wind/aero model).
+    env = RateVelAviary(gui=False, episode_len_sec=100, mass_range=(3.5, 3.5),
                         wind_max=0.0, motor_tau_range=(0.10, 0.10))
     env.reset(seed=7)
     env.wind = np.array([12.0, 0.0, 0.0])                 # known steady wind
     for _ in range(120):                                   # let flight + EMA settle
         env.step(np.zeros(4, dtype=np.float32))
-    v_rel = env.vel[0] - env.wind
-    true_f = -env.WIND_DRAG * np.linalg.norm(v_rel) * v_rel   # actual external force
+    R = np.array(p.getMatrixFromQuaternion(env.quat[0])).reshape(3, 3)
+    true_f = env._wing_aero(R)                             # actual external (wing aero) force
     est = env.wind_est
     err = np.linalg.norm(est - true_f)
-    print(f"  true wind force {np.round(true_f,1)} N  |  estimate {np.round(est,1)} N  "
-          f"|  err {err:.1f} N  [{'OK' if err < 3.0 else 'FAIL'}]")
+    print(f"  true ext force {np.round(true_f,1)} N  |  estimate {np.round(est,1)} N  "
+          f"|  err {err:.1f} N  [{'OK' if err < 5.0 else 'FAIL'}]")
     env.close()
 
 
@@ -94,7 +97,7 @@ def test_api():
     print("\n=== Gym API / shapes / DR ranges ===")
     env = RateVelAviary(gui=False)
     obs, info = env.reset(seed=2)
-    assert obs.shape == (29,), obs.shape
+    assert obs.shape == (30,), obs.shape
     masses = []
     ep = 0
     obs, _ = env.reset(seed=3)

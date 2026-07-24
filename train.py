@@ -61,19 +61,21 @@ def main():
                "pos_range": args.pos_range, "speed_cap": args.speed_cap},
               open(os.path.join(args.out_dir, "config.json"), "w"))
 
-    env_kwargs = dict(task=args.task, episode_len_sec=8.0, max_speed=20.0,
-                      pos_range=args.pos_range, speed_cap=args.speed_cap)
+    base_kwargs = dict(task=args.task, episode_len_sec=8.0, max_speed=80.0,
+                       pos_range=args.pos_range, speed_cap=args.speed_cap)
+    train_kwargs = dict(base_kwargs, randomize_init=True)    # explore inversion/dive/high-speed
+    eval_kwargs = dict(base_kwargs, randomize_init=False)    # standard hover start -> comparable metric
     train_env, train_norm = build_stacked(args.n_envs, args.seed, not args.no_subproc,
-                                          args.n_stack, True, True, env_kwargs)
+                                          args.n_stack, True, True, train_kwargs)
     eval_env, _ = build_stacked(1, args.seed + 999, not args.no_subproc,
-                                args.n_stack, False, False, env_kwargs)
+                                args.n_stack, False, False, eval_kwargs)
 
     model = PPO(
         "MlpPolicy", train_env,
         n_steps=2048, batch_size=4096, n_epochs=10,
         gamma=0.99, gae_lambda=0.95, clip_range=0.2,
         ent_coef=0.0, learning_rate=3e-4, max_grad_norm=0.5,
-        policy_kwargs=dict(net_arch=[128, 128]),
+        policy_kwargs=dict(net_arch=[256, 256]),
         tensorboard_log=os.path.join(args.out_dir, "tb"),
         seed=args.seed, verbose=1,
     )
