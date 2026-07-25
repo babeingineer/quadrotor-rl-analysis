@@ -460,8 +460,11 @@ class RateVelAviary(BaseAviary):
             # Linear term (scaled) is the far-field pull.
             s = self.MAX_SPEED / 20.0
             d = np.linalg.norm(self.vel[0] - self.target_vel)
-            reward = (np.exp(-0.5 * (d / 2.0) ** 2)                # narrow precision peak
+            reward = (1.0 - np.tanh(d / 2.0)                       # SHARP precision peak: steepest
+                      #                                              gradient AT d=0 (no flat-top
+                      #                                              deadband, unlike a Gaussian)
                       + np.exp(-0.5 * (d / (10.0 * s)) ** 2)       # wide coverage (scales to envelope)
+                      #                                              -> guides into the sharp region
                       - (0.02 / s) * d + smooth)
         else:  # position: reach target AND stop there; soft speed cap
             dp = np.linalg.norm(self.target_pos - self.pos[0])

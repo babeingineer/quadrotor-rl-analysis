@@ -9,16 +9,20 @@ sphere, speed `Uniform(0, MAX_SPEED)`; 0 = hover).
 The quad project (velocity + position tasks, runs T1–T16) is in [`TRAINING_HISTORY.md`](TRAINING_HISTORY.md);
 this file is the tailsitter phase only.
 
-**Headline:** the aggregate steady-state speed error went **~9.6 → 4.8 m/s**. The single lever
-that broke the plateau was a **leaky velocity-error integrator in the observation** (8.1 → 4.8).
-More-training, domain-randomization removal, hard-corner oversampling, and a dive curriculum all
-**failed** to move the plateau. Final champion: **`tsI2` / `tsI3`** (12–16 M steps, +integrator).
+**Headline:** the aggregate steady-state speed error went **~9.6 → 4.6 m/s**. Two levers did the
+work, both classical-control-informed: a **leaky velocity-error integrator in the observation**
+(the breakthrough, 8.1 → 4.8) and a **sharp tanh precision peak in the reward** (the polish,
+4.8 → 4.63). Everything else — more training, domain-randomization removal, hard-corner
+oversampling, a dive curriculum, and longer episodes — **failed** to move the plateau, and past
+saturation extra steps actively **regressed**. Final champion: **`tsIt`** (16 M steps, integrator
++ tanh reward).
 
 ![Tailsitter training arc — error across every run](docs/fig_ts_arc.png)
 
-*Green = the integrator runs (breakthrough); red = failed levers (`ts2` confounded, `ts3` hover
-collapse from undertraining, `ts3d` hard-corner, `tsIc` curriculum). Bars: aggregate error (dark)
-and the high-speed band (light).*
+*Green = integrator runs (breakthrough), bright green = `tsIt` champion (+tanh reward). Red =
+failed levers (`ts2` confounded, `ts3` hover collapse from undertraining, `ts3d` hard-corner,
+`tsIc` curriculum, `tsD` deeper 256×256×256 net). Pink = post-saturation regressions (`tsIt2`
+more steps, `tsIt3` 20 s episodes). Bars: aggregate error (dark) and high-speed band (light).*
 
 ---
 
@@ -125,8 +129,19 @@ A **narrow 2 m/s precision peak** (sharp gradient near the target, restores low-
 **plus** a wide coverage peak that scales with the envelope (keeps a gradient far from target for
 high-speed acceleration). Verified gradient: 2.00 @ d=0 → 1.88 @1 → 1.60 @2 → 1.11 @4 → 0.36 @20.
 
-Reward tweaks were otherwise **deliberately avoided** — consistent with the quad lesson that more
-training + a clean reward beats shaping tricks. R2 was the last reward change.
+**R3 — sharp tanh precision peak (final; `tsIt` onward):**
+```
+r = (1 − tanh(d/2))  +  exp(−½(d/(10s))²)  − (0.02/s)·d + smooth      # SHARP peak + wide coverage
+```
+The narrow Gaussian in R2 has a **flat top** — its slope at `d=0` is ≈ 0 (a deadband), so near the
+target the policy gets almost no gradient and settles *near*, not *on*, the target (the same bug
+that pinned the quad hover at 0.5 m, `TRAINING_HISTORY.md` T11). `1 − tanh(d/2)` is **steepest
+exactly at `d=0`** (slope ≈ −0.5 vs the Gaussian's −0.005 — ~100× stronger gradient at the
+target). The historical risk of "too sharp" (a narrow unreachable peak, T12) does **not** apply
+here because the **wide coverage term guides the policy into the sharp region** — the wide term is
+the safety net. Result: calm hover **0.49 → 0.31 m/s**, aggregate **4.81 → 4.63**. (Reward tweaks
+were otherwise deliberately avoided; R1→R2→R3 were the only reward changes, each with a measured
+reason.)
 
 ---
 
@@ -167,6 +182,10 @@ Crash rate was **0%** for every run.
 | **tsI2**| 12 M | 256 | R2 | yes | 8 s  | continue tsI | 0.82 | 2.51 | 6.12 | 4.58 | **4.76** |
 | **tsI3**| 16 M | 256 | R2 | yes | 8 s  | continue tsI2 | 0.69 | 2.44 | 5.09 | 5.90 | **4.81** |
 | **tsIc**| 16 M | 256 | R2 | yes | 8 s  | tsI2 + dive curriculum | 0.76 | 2.47 | 5.76 | 5.31 | **4.88** |
+| **tsIt** ⭐| 16 M | 256 | **R3** | yes | 8 s | tsI2 + **tanh reward** | **0.59** | 2.31 | 5.35 | 5.20 | **4.63** |
+| **tsIt2**| 20 M | 256 | R3 | yes | 8 s  | continue tsIt (regressed) | 1.15 | 2.50 | 5.41 | 6.92 | **5.35** |
+| **tsIt3**| 24 M | 256 | R3 | yes | **20 s** | continue tsIt2 (regressed) | 0.66 | 2.38 | 5.38 | 7.79 | **5.63** |
+| **tsD**  | 16 M (fresh) | **256×256×256** | R3 | yes | 8 s | capacity test (fresh, not staged) | 1.08 | 3.26 | 6.50 | 10.45 | **7.27** |
 
 ### Per-run detail
 
@@ -218,6 +237,41 @@ Change: 30% of targets drawn from a dive curriculum whose angle (10°→90° bel
 speed (40→80) ramp with a `dive_level` knob (0→1 over the first 3 M steps, callback-driven).
 Result: **no change** (ALL 4.88; down/calm 90→90%, down/wind 83→82%). Bulk preserved (curriculum
 didn't hurt), but the dive corner was unmoved — ruling out "wrong optimization path."
+
+**`tsIt` (16 M) — `tsI2` + sharp tanh reward R3 (⭐ CHAMPION).**
+Change: only the narrow reward peak, Gaussian → `1 − tanh(d/2)` (else = `tsI2`, continued +4 M).
+Result: **near-target precision tightened** exactly as the gradient predicted — calm hover
+**0.49 → 0.31**, low 2.44 → 2.31 — and aggregate **4.81 → 4.63** (new best). As predicted, a
+*polish* not a corner fix: the 5–6 m/s high/mid residual sits outside the 2 m/s peak, so the
+aggregate moved only ~4%.
+
+**`tsIt2` (20 M) — continue `tsIt` (REGRESSED).**
+More of the same 8 s training past saturation: ALL **4.63 → 5.35** (hover 0.59 → 1.15, high
+5.20 → 6.92). Past convergence, with `ent_coef = 0`, the policy over-sharpens / drifts and
+on-policy forgetting degrades under-visited regimes (hover). More steps ≠ better once saturated.
+
+**`tsIt3` (24 M) — `tsIt2` + 20 s episodes (REGRESSED).**
+Hypothesis: 8 s episodes end before the τ=3 s integral fully settles (~9 s), so longer episodes
+should let the policy exploit the settled integral. Hover *did* recover (1.15 → 0.66), but
+**high-speed got worse** (6.92 → 7.79) and ALL rose to **5.63**. Same mechanism as `ts2`'s 15 s: a
+longer episode shifts experience toward the settled phase and *away* from high-speed reaching, so
+that skill decays. The settling benefit didn't outweigh the distribution-shift cost. **Episode
+length is not a free lever.**
+
+**`tsD` (16 M, fresh) — 256×256×256 network capacity test (WORSE).**
+Change: same best config (integrator + R3 tanh + random-init + 8 s) but a **deeper 3-layer
+256×256×256** net, trained **fresh** to 16 M. Result: **ALL 7.27** — worse than the 256×256
+champion on every band (hover 1.08, high 10.45 vs the champion's 0.59 / 5.20). Two reads, both
+pointing away from capacity as the lever:
+(1) it matches the prior that **capacity was never the bottleneck** — the residual is
+sensing/corner-limited, not "not enough network" (the DR ablation and the all-bands-improve-
+together pattern already said so); an extra layer unlocked nothing.
+(2) **partial confound:** `tsD` is a single fresh 16 M shot, whereas the champion was built by
+**staged continuation** (`tsI` 8 M → `tsI2` → `tsIt`), which warms up the integrator behavior
+before refining; deeper nets are also harder to optimize and typically need more steps. So some
+of the gap is fresh-vs-staged, not purely "3 layers is bad." But even against the **fresh** 8 M
+256×256 run (`tsI`, 6.43), fresh 16 M 256×256×256 is worse (7.27) → the extra capacity bought
+nothing and, if anything, slowed learning. **Verdict: no reason to go deeper.**
 
 ---
 
@@ -271,25 +325,35 @@ but **70-straight-down truly plateaus at ~50 m/s** even at 20 s. Aggregate at 20
 | Flat-plate wings + remove tilt-crash | transition/dive/cruise all emerge | ✅ core enabler |
 | Multi-scale reward (R2) | restored low-speed precision vs R1 | ✅ |
 | 256-net + random-init | taught dive & wing-borne cruise | ✅ (but needs enough steps) |
-| **More training (to a point)** | recovers precision; **all bands improve together** | ✅ until it saturates |
+| **More training (while underfit)** | recovers precision; **all bands improve together** | ✅ until it saturates |
 | **Velocity-error integrator** | **8.1 → 4.8**; nulls steady-state + escapes dive plateau | ✅✅ the breakthrough |
-| More *uniform* training past saturation | flat | ➖ diminishing |
+| **Sharp tanh reward peak (R3)** | calm hover 0.49 → 0.31; **4.81 → 4.63** | ✅ precision polish |
+| More training *past saturation* (`tsIt2`) | **4.63 → 5.35** (drift/forgetting) | ❌ regresses |
+| Longer (20 s) episodes (`tsIt3`) | hover ↑ but high-speed ↓; **→ 5.63** | ❌ distribution shift |
 | Hard-corner oversampling (`ts3d`) | worse everywhere | ❌ |
 | Dive curriculum (`tsIc`) | dive corner unmoved | ❌ (wrong lever — it's sensing, not path) |
+| Deeper net 256×256×256 (`tsD`) | 7.27 (worse) | ❌ capacity not the bottleneck |
 | Removing DR | no aggregate change | ➖ (proves obs adequate except crosswind) |
 
 ---
 
-## 8. Final result (`tsI2` / `tsI3`, effectively tied)
+## 8. Final result (`tsIt`, 16 M, integrator + tanh reward)
 
-- **Aggregate ~4.8 m/s** (from ~9.6), **0% crashes**, full 0–80 m/s omnidirectional envelope.
-- **hover 0.5 m/s (calm)**, everyday tracking **2.4–2.5 m/s**, up/level high-speed **95–99% reach**.
+- **Aggregate 4.63 m/s** (from ~9.6), **0% crashes**, full 0–80 m/s omnidirectional envelope.
+- **calm hover 0.31 m/s**, everyday tracking **2.3 m/s**, up/level high-speed **95–99% reach**.
 - Learned: hover→cruise transition, climb, **wing-borne cruise to 80 m/s**, and dives.
 - Residual concentrated in one corner: the **extreme dive, especially into wind** (down/wind
-  ~13–14 m/s, ~82% reach) — robust to more-training, DR-removal, hard-corner, and curriculum.
+  ~13–14 m/s, ~82% reach) — robust to more-training, DR-removal, hard-corner, curriculum, and
+  longer episodes.
 
-The remaining evidence-backed lever (untried) is a **3-axis airspeed sensor** for the crosswind
-gap; the pure straight-down dive-commitment appears near a genuine floor for this reward/policy.
+**Saturation is confirmed:** from `tsIt` (16 M) every training-side / capacity lever — more 8 s
+steps (`tsIt2`), 20 s episodes (`tsIt3`), curriculum (`tsIc`), and a deeper 256×256×256 net
+(`tsD`, 7.27) — **regressed or failed**. Further gains need a *structural* change that adds new
+signal (e.g. richer sensing), not more steps / capacity / shaping. The remaining evidence-backed lever (untried) is
+a **3-axis airspeed sensor** for the crosswind gap; the pure straight-down dive-commitment appears
+near a genuine floor for this reward/policy. `ent_coef = 0` was inherited and *helped* precision
+(let policy std shrink → tight hover) but contributes to the late-training drift — a small
+`ent_coef` is a candidate probe for stable continued training.
 
 ---
 
@@ -314,3 +378,29 @@ gap; the pure straight-down dive-commitment appears near a genuine floor for thi
 6. **A curriculum only helps if the problem is a wrong optimization *path*.** The dive corner was
    robust to curriculum because its residual is sensing (crosswind) + near-limit control, not a
    reachable-but-unexplored optimum.
+7. **A sharp (non-squared) reward peak beats a Gaussian for terminal precision.** `exp(−½(d/2)²)`
+   has ~zero slope at the target (flat-top deadband → settles *near*, not *on*). `1 − tanh(d/2)`
+   is steepest *at* the target (~100× the gradient at d=0) and tightened calm hover 0.49 → 0.31.
+   Safe here because the wide coverage term guides the policy into the sharp region (the T12
+   "too-sharp unreachable island" failure needs *no* such guide).
+8. **More training past saturation doesn't plateau — it can *regress*.** `tsIt`→`tsIt2` went
+   4.63 → 5.35. Once there's no signal left, on-policy updates are noise: with `ent_coef = 0` the
+   policy over-sharpens and *forgets* under-visited regimes (hover degraded first). Keep
+   checkpoints and pick the one that **evals best**, not the latest. ("Best" saved by a 10-episode
+   *reward* eval is itself noisy and not the same as the error metric — another reason to re-eval.)
+9. **Episode length is not a free lever.** 20 s episodes (to let the τ=3 s integral settle)
+   recovered hover but *hurt* high-speed — a longer episode shifts experience toward the settled
+   phase and away from the reaching/transition phase, decaying that skill (same as `ts2`'s 15 s).
+   Changing horizon changes the *training distribution*, not just "more time."
+10. **`ent_coef = 0` is a precision/stability trade-off, not a free default.** It let the Gaussian
+    policy's std shrink → tight deterministic tracking (good for hover precision), and exploration
+    came from DR + random-init rather than action entropy. But it also removes the floor that
+    would keep late training stable, contributing to the `tsIt2` drift. A small `ent_coef` trades
+    peak precision for stability/exploration — worth it only if pushing past a clean saturation.
+11. **More capacity ≠ better when capacity isn't the bottleneck.** A deeper 256×256×256 net
+    (`tsD`, 7.27) lost to the 256×256 champion (4.63). The residual was sensing/corner-limited,
+    not representational, so extra layers bought nothing — and, trained fresh, the deeper net was
+    *harder* to optimize (even worse than the fresh 8 M shallow `tsI` at 6.43). Diagnose the
+    bottleneck before scaling the model. Corollary: **fresh single-shot training underperforms a
+    staged continuation** here — warming up a behavior (integrator) then refining beats one long
+    cold run, so compare like-for-like (same schedule) before blaming an architecture.

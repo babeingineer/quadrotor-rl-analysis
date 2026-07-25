@@ -336,18 +336,21 @@ The env was later converted from the heavy quad to a **quadrotor tailsitter VTOL
 ~90° to fly forward on the wings). Task: track a random 3-D target velocity, **0–80 m/s
 omnidirectional**. Full detail — every run, reward, ablation — is in [`TAILSITTER.md`](TAILSITTER.md).
 
-**Arc:** aggregate steady-state speed error **~9.6 → 4.8 m/s**, **0% crashes**, full envelope.
-The breakthrough was a **leaky velocity-error integrator in the observation** (8.1 → 4.8) — the
-classical outer-loop-PID trick, which also acted as a "stuck-below-target" detector. More
-training, DR removal, hard-corner oversampling, and a dive curriculum all **failed** to move the
-plateau. Final policy (`results_tsI2`/`tsI3`): **hover 0.5 m/s, everyday tracking 2.4 m/s,
+**Arc:** aggregate steady-state speed error **~9.6 → 4.6 m/s**, **0% crashes**, full envelope. Two
+classical-control-informed levers did the work: a **leaky velocity-error integrator in the
+observation** (the breakthrough, 8.1 → 4.8, which also acted as a "stuck-below-target" detector)
+and a **sharp `1−tanh(d/2)` reward peak** (the polish, 4.8 → 4.63, vs a Gaussian's flat-top
+deadband). Everything else — more training, DR removal, hard-corner oversampling, a dive
+curriculum, longer episodes, a deeper 256×256×256 net — **failed**, and past saturation extra
+steps **regressed** (4.63 → 5.35). Final policy (**`results_tsIt`**, 16 M): **calm hover 0.31 m/s, everyday tracking 2.3 m/s,
 up/level high-speed 95–99% reach, wing-borne cruise to 80 m/s, learned dives**; residual
 concentrated in the extreme **dive-into-wind** corner (a crosswind-sensing + near-limit issue).
 
 ```bash
-# tailsitter velocity task (baseline -> +bigger net & random-init -> +integrator, via continuation)
+# tailsitter velocity task (baseline -> +bigger net & random-init -> +integrator -> +tanh reward)
 python train.py --timesteps 8000000 --n-envs 6 --use-integral --out-dir results_tsI
 python continue_train.py --src results_tsI  --out results_tsI2 --extra 4000000     # -> 12M
-python continue_train.py --src results_tsI2 --out results_tsI3 --extra 4000000     # -> 16M
+# (then the tanh precision peak R3 in _computeReward)
+python continue_train.py --src results_tsI2 --out results_tsIt --extra 4000000     # -> 16M champion
 python eval_ts.py                                                                  # band + figure
 ```

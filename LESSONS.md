@@ -479,3 +479,29 @@ The env was converted to a **tailsitter VTOL** (2–5 kg, fixed wings, flat-plat
    band trains against optimistic constant thrust (real prop limit ~50), and that the dive/
    into-wind residuals are *feasible* (learnable), not physical walls — sending effort to sensing
    rather than chasing an impossible target.
+9. **A sharp (non-squared) reward peak beats a Gaussian for terminal precision.** A Gaussian
+   `exp(−½(d/σ)²)` has ~zero gradient *at* the target (flat-top deadband → settles near, not on);
+   `1 − tanh(d/σ)` is steepest at the target (~100× the gradient at d=0) and tightened calm hover
+   0.49 → 0.31 m/s. This is the *same* lesson as the quad's flat-peak deadband — now the fix
+   (sharp cusp) is confirmed, and it's safe when a wide coverage term guides the policy into the
+   sharp region.
+10. **More training past saturation can *regress*, not just plateau.** With `ent_coef = 0`, once
+    the signal is exhausted, on-policy updates are noise: the policy over-sharpens and *forgets*
+    under-visited regimes (4.63 → 5.35, hover degrading first). Keep checkpoints; pick the one
+    that **evals best**, not the latest — and remember the auto-saved "best" is chosen by a noisy
+    10-episode *reward* eval, not your actual metric.
+11. **Episode length changes the training *distribution*, not just "more time."** Longer (20 s)
+    episodes recovered hover but hurt high-speed, because experience shifts toward the settled
+    phase and away from the reaching/transition phase. Horizon is a distribution knob, not a free
+    lever (cf. the confounded `ts2` 15 s run).
+12. **`ent_coef = 0` is a precision↔stability trade-off.** For continuous control it's standard
+    (SB3 default) and it *helped* — letting the Gaussian std shrink gave tight deterministic
+    tracking, with exploration supplied by DR + random-init instead of action entropy. The cost is
+    no stability floor for very long training (contributes to post-saturation drift). A small
+    `ent_coef` buys stability/exploration at some precision cost — only worth it past a clean
+    saturation.
+13. **Don't scale the model to fix a non-representational bottleneck.** A deeper 256×256×256 net
+    lost to 256×256 (7.27 vs 4.63): the residual was sensing/corner-limited, so extra capacity
+    bought nothing and (trained fresh) was *harder* to optimize. Diagnose the bottleneck first.
+    Related: **fresh single-shot training underperformed a staged continuation** — warming up a
+    behavior then refining beat one long cold run, so compare same-schedule before blaming the net.

@@ -54,6 +54,8 @@ def main():
                     help="fraction of training targets oversampled at weak corners (0 = uniform)")
     ap.add_argument("--use-integral", action="store_true",
                     help="add a leaky+clamped velocity-error integral to the observation")
+    ap.add_argument("--net", type=str, default="256,256",
+                    help="policy/value hidden layer sizes, comma-separated (e.g. 256,256,256)")
     ap.add_argument("--no-subproc", action="store_true")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
@@ -83,7 +85,7 @@ def main():
         n_steps=2048, batch_size=4096, n_epochs=10,
         gamma=0.99, gae_lambda=0.95, clip_range=0.2,
         ent_coef=0.0, learning_rate=3e-4, max_grad_norm=0.5,
-        policy_kwargs=dict(net_arch=[256, 256]),
+        policy_kwargs=dict(net_arch=[int(x) for x in args.net.split(",")]),
         tensorboard_log=os.path.join(args.out_dir, "tb"),
         seed=args.seed, verbose=1,
     )

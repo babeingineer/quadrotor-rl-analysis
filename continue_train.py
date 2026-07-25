@@ -20,11 +20,13 @@ def main():
     ap.add_argument("--n-envs", type=int, default=6)
     ap.add_argument("--dive-curriculum", action="store_true",
                     help="ramp downward-dive difficulty (shallow->steep) over 75%% of --extra")
+    ap.add_argument("--episode-len", type=float, default=8.0,
+                    help="training episode length (s); longer lets the leaky integral fully settle")
     args = ap.parse_args()
 
     cfg = json.load(open(os.path.join(args.src, "config.json")))
     assert cfg.get("n_stack", 1) == 1
-    base_kwargs = dict(task=cfg.get("task", "velocity"), episode_len_sec=8.0, max_speed=80.0,
+    base_kwargs = dict(task=cfg.get("task", "velocity"), episode_len_sec=args.episode_len, max_speed=80.0,
                        pos_range=cfg.get("pos_range", 30.0), speed_cap=cfg.get("speed_cap", 18.0))
     ui = cfg.get("use_integral", False)   # must match the saved model's obs dim
     train_kwargs = dict(base_kwargs, randomize_init=True, hard_corner_frac=0.0, use_vel_integral=ui,
