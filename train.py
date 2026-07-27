@@ -54,6 +54,8 @@ def main():
                     help="fraction of training targets oversampled at weak corners (0 = uniform)")
     ap.add_argument("--use-integral", action="store_true",
                     help="add a leaky+clamped velocity-error integral to the observation")
+    ap.add_argument("--no-wind-est", action="store_true",
+                    help="drop the disturbance-observer wind estimate from the observation")
     ap.add_argument("--net", type=str, default="256,256",
                     help="policy/value hidden layer sizes, comma-separated (e.g. 256,256,256)")
     ap.add_argument("--no-subproc", action="store_true")
@@ -63,14 +65,15 @@ def main():
     if args.smoke:
         args.timesteps, args.n_envs = 20_000, 2
     os.makedirs(args.out_dir, exist_ok=True)
+    use_wind_est = not args.no_wind_est
     json.dump({"n_stack": args.n_stack, "task": args.task,
                "pos_range": args.pos_range, "speed_cap": args.speed_cap,
-               "use_integral": args.use_integral},
+               "use_integral": args.use_integral, "use_wind_est": use_wind_est},
               open(os.path.join(args.out_dir, "config.json"), "w"))
 
     base_kwargs = dict(task=args.task, episode_len_sec=8.0, max_speed=80.0,
-                       pos_range=args.pos_range, speed_cap=args.speed_cap)
-    # use_vel_integral must match on train+eval (obs dim); hard_corner only shapes training
+                       pos_range=args.pos_range, speed_cap=args.speed_cap, use_wind_est=use_wind_est)
+    # use_vel_integral/use_wind_est must match on train+eval (obs dim); hard_corner only shapes training
     train_kwargs = dict(base_kwargs, randomize_init=True, hard_corner_frac=args.hard_corner,
                         use_vel_integral=args.use_integral)
     eval_kwargs = dict(base_kwargs, randomize_init=False, hard_corner_frac=0.0,

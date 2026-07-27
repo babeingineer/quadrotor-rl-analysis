@@ -72,6 +72,7 @@ class RateVelAviary(BaseAviary):
                  hard_corner_frac: float = 0.0,  # fraction of TRAINING targets oversampled at the
                  #                                 weak corners (high-speed + downward-biased). 0 =
                  #                                 uniform (use for eval so the metric stays comparable)
+                 use_wind_est: bool = True,       # include the disturbance-observer wind estimate in obs
                  use_vel_integral: bool = False,  # add a leaky+clamped velocity-error integral to obs
                  integral_tau: float = 3.0,       # leak time constant (s): anti-windup + forgets old
                  #                                  setpoint transients so it works with changing targets
@@ -112,6 +113,7 @@ class RateVelAviary(BaseAviary):
         self.J_NOMINAL = np.array(inertia_nominal, dtype=float)   # at NOMINAL_MASS
         self.RANDOMIZE_INIT = bool(randomize_init)
         self.HARD_CORNER_FRAC = float(hard_corner_frac)
+        self.USE_WIND_EST = bool(use_wind_est)
         self.USE_VEL_INTEGRAL = bool(use_vel_integral)
         self.INTEGRAL_TAU = float(integral_tau)
         self.vel_integral = np.zeros(3)          # leaky velocity-error integral (obs feature)
@@ -184,10 +186,10 @@ class RateVelAviary(BaseAviary):
         return spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
     def _observationSpace(self):
-        # [vel_err(3), target_vel(3), R(9), omega_body(3), last_action(4),
-        #  motor_rpm(4), ext_force_est(3), pitot_airspeed(1)] = 30
-        # (+ vel_err_integral(3) = 33 when use_vel_integral)
-        dim = 33 if self.USE_VEL_INTEGRAL else 30
+        # base 27 = [vel_err(3), target_vel(3), R(9), omega_body(3), last_action(4),
+        #            motor_rpm(4), pitot_airspeed(1)]
+        # + ext_force_est(3) if use_wind_est  (=30)   + vel_err_integral(3) if use_vel_integral (=33)
+        dim = 27 + (3 if self.USE_WIND_EST else 0) + (3 if self.USE_VEL_INTEGRAL else 0)
         return spaces.Box(low=-np.inf, high=np.inf, shape=(dim,), dtype=np.float32)
 
     # ------------------------------------------------- reset / domain random.
@@ -429,18 +431,19 @@ class RateVelAviary(BaseAviary):
                 rel = rel * (self.POS_RANGE / n)
             first6 = np.concatenate([rel / self.POS_RANGE,                                # rel pos
                                      self.vel[0] / self.MAX_SPEED])                        # velocity
-        obs = np.concatenate([
+        parts = [
             first6,                               # 6
             R.reshape(9),                         # 9
             omega_body / self.MAX_RATE[0],        # 3
             self.current_action,                  # 4
             rpm_norm,                             # 4  <- solves motor delay
-            self.wind_est / self.NOMINAL_HOVER,   # 3  <- external force (wind + wing aero)
-            [pitot / self.MAX_SPEED],             # 1  <- forward airspeed (drives the wings)
-        ])
+        ]
+        if self.USE_WIND_EST:
+            parts.append(self.wind_est / self.NOMINAL_HOVER)   # 3  <- disturbance-observer estimate
+        parts.append([pitot / self.MAX_SPEED])                 # 1  <- forward airspeed (drives wings)
         if self.USE_VEL_INTEGRAL:
-            obs = np.concatenate([obs, self.vel_integral / self.MAX_SPEED])  # 3  <- steady-state nulling
-        return obs.astype(np.float32)
+            parts.append(self.vel_integral / self.MAX_SPEED)   # 3  <- steady-state nulling
+        return np.concatenate(parts).astype(np.float32)
 
     # ---------------------------------------------------------------- reward
     def _computeReward(self):

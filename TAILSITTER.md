@@ -186,6 +186,7 @@ Crash rate was **0%** for every run.
 | **tsIt2**| 20 M | 256 | R3 | yes | 8 s  | continue tsIt (regressed) | 1.15 | 2.50 | 5.41 | 6.92 | **5.35** |
 | **tsIt3**| 24 M | 256 | R3 | yes | **20 s** | continue tsIt2 (regressed) | 0.66 | 2.38 | 5.38 | 7.79 | **5.63** |
 | **tsD**  | 16 M (fresh) | **256×256×256** | R3 | yes | 8 s | capacity test (fresh, not staged) | 1.08 | 3.26 | 6.50 | 10.45 | **7.27** |
+| **tsD2** | 24 M | **256×256×256** | R3 | yes | 8 s | continue tsD (+8 M — regressed) | 1.08 | 3.74 | 7.02 | 12.76 | **8.45** |
 
 ### Per-run detail
 
@@ -272,6 +273,17 @@ before refining; deeper nets are also harder to optimize and typically need more
 of the gap is fresh-vs-staged, not purely "3 layers is bad." But even against the **fresh** 8 M
 256×256 run (`tsI`, 6.43), fresh 16 M 256×256×256 is worse (7.27) → the extra capacity bought
 nothing and, if anything, slowed learning. **Verdict: no reason to go deeper.**
+
+**`tsD2` (24 M) — `tsD` + 8 M more (tested "is it just undertrained?" — NO).**
+The natural objection: a bigger net should be *at least as good*, so maybe `tsD` was just
+undertrained and slow to converge — train it more. Tested it: +8 M made it **worse**, 7.27 →
+**8.45** (high 10.45 → 12.76), nowhere near the champion's 4.63. So the deeper net was **not**
+merely undertrained — under on-policy PPO with `ent_coef=0`, the extra capacity **overfits the
+self-generated data and drifts** (same post-saturation regression as `tsIt2`/`tsIt3`, but from a
+worse start and with more room to overfit). The "bigger net ≥ smaller net" guarantee holds for
+supervised learning (fixed data, optimization toward a global optimum); on-policy RL has neither,
+so more capacity converged to a *worse* practical solution and more training amplified the drift.
+**Bigger is genuinely worse here, and training more does not rescue it.**
 
 ---
 
@@ -397,10 +409,106 @@ near a genuine floor for this reward/policy. `ent_coef = 0` was inherited and *h
     came from DR + random-init rather than action entropy. But it also removes the floor that
     would keep late training stable, contributing to the `tsIt2` drift. A small `ent_coef` trades
     peak precision for stability/exploration — worth it only if pushing past a clean saturation.
-11. **More capacity ≠ better when capacity isn't the bottleneck.** A deeper 256×256×256 net
-    (`tsD`, 7.27) lost to the 256×256 champion (4.63). The residual was sensing/corner-limited,
-    not representational, so extra layers bought nothing — and, trained fresh, the deeper net was
-    *harder* to optimize (even worse than the fresh 8 M shallow `tsI` at 6.43). Diagnose the
-    bottleneck before scaling the model. Corollary: **fresh single-shot training underperforms a
-    staged continuation** here — warming up a behavior (integrator) then refining beats one long
-    cold run, so compare like-for-like (same schedule) before blaming an architecture.
+11. **More capacity ≠ better when capacity isn't the bottleneck — and "just train it more"
+    doesn't save it.** A deeper 256×256×256 net (`tsD`, 7.27) lost to the 256×256 champion (4.63);
+    training it 8 M *more* made it **worse still** (`tsD2`, 8.45), not closer. The "bigger net ≥
+    smaller net" intuition is a *supervised-learning* guarantee (fixed data, optimization toward a
+    global optimum). On-policy RL has neither: with self-generated data + a bootstrapped critic +
+    `ent_coef=0`, extra capacity **overfits and drifts**, converging to a *worse* practical
+    solution that more steps only degrade. The residual here was sensing/corner-limited, not
+    representational, so the extra parameters were pure liability. Diagnose the bottleneck before
+    scaling the model. Corollary: **fresh single-shot training underperformed a staged
+    continuation** (warm up a behavior, then refine) — compare same-schedule before blaming a net.
+
+---
+
+## 10. Memory ablation — MLP vs frame-stack vs LSTM, and do the hand-designed features (wind_est + integrator) survive memory?
+
+**The question.** The champion (`tsIt`) is a *memoryless* MLP that relies on two hand-designed
+features to cope with hidden state: the **disturbance-observer wind estimate** (`wind_est`) and
+the **leaky velocity-error integrator**. Two natural challenges:
+1. Would a policy with **temporal memory** — a **frame-stack** (windowed history) or an **LSTM**
+   (learned recurrent memory) — do better than the memoryless MLP?
+2. If it has memory, can it **re-derive** the wind estimate and the integral from raw history,
+   making those hand-designed features **redundant**? (I.e., do we still need them?)
+
+**Design — a clean 6-cell matrix.** Everything identical except the observation; the reward
+(R3), task (0–80 m/s omnidirectional), tough random-init, and full DR are the same in all cells,
+all **fresh at 4 M steps**. The only two axes:
+- memory: **MLP** (none) / **frame-stack ×4** (`VecFrameStack`, VecNormalize *outside*) / **LSTM**
+  (`sb3_contrib.RecurrentPPO`, `MlpLstmPolicy`).
+- features: **+feat** = `wind_est`(3) **and** integrator(3) in the obs / **raw** = **neither**
+  (a `use_wind_est=False` env flag was added to drop the observer; obs = 27 raw / 30 / 33).
+
+Net was **`[256,256]`** for all (LSTM adds `lstm_hidden_size=256`). Evaluated with `eval_mem.py`
+through the real vec-env stack (byte-identical wrapper order), constant target per episode, and —
+for the LSTM — `state` + `episode_start` threaded through `predict` (validated: it reproduces
+`eval_ts` on `tsIt` to 4.48 vs 4.63). Tooling: `train_lstm.py`, `train.py --n-stack`/`--no-wind-est`,
+`eval_mem.py`.
+
+### Results — aggregate velocity error (m/s), 4 M each
+
+| memory | **+feat** (wind_est + integrator) | **raw** (neither) |
+|---|---|---|
+| **MLP** (memoryless) | 9.95 | 8.56 |
+| **frame-stack ×4** | 16.36 | 14.41 |
+| **LSTM** | **7.49** ⭐ | 9.05 |
+
+Per-band for the `+feat` cells (the high band is where memory should matter most):
+
+| band | MLP+feat | FS+feat | **LSTM+feat** |
+|---|---|---|---|
+| hover(0–1) | 3.67 | 3.82 | 3.90 |
+| low(1–20) | 4.81 | 5.39 | 5.31 |
+| mid(20–50) | 7.82 | 11.75 | **7.34** |
+| high(50–80) | 16.02 | 29.38 | **9.20** |
+
+### Training cost (same 4 M steps, 6 envs)
+
+| policy | throughput | wall-clock (4 M) |
+|---|---|---|
+| frame-stack | ~2140 fps | ~31 min |
+| MLP | ~1013 fps | ~66 min |
+| **LSTM** | ~347 fps | **~192 min (3.2 h)** |
+
+**LSTM is ~2.9× slower than MLP** per step — the `RecurrentPPO` cost of sequential BPTT over the
+episode-length sequences (can't parallelize across time like a feed-forward minibatch). Frame-stack
+is *fastest* (trivial forward pass) but *worst*.
+
+### The decisive factor: memory HORIZON, not just "memory yes/no"
+- **LSTM** carries its hidden state **from episode start to reset → the full ~400-step / 8 s
+  episode**. BPTT during training runs over episode-length sequences (no short truncation window).
+- **frame-stack `n_stack=4`** is a **fixed 4-frame = 80 ms** window of raw history.
+
+That is a **~100× difference in memory horizon** (8 s vs 80 ms). The dynamics this task needs to
+infer (wind response, converging to a velocity, motor-lag spin-up) evolve over *seconds*, so 80 ms
+captures almost none of it while the LSTM sees the whole trajectory — the main reason LSTM crushed
+frame-stack (high-speed 9.2 vs 29.4).
+
+### Findings (answers to the two questions)
+1. **LSTM > MLP > frame-stack.** LSTM+feat (7.49) beat the memoryless MLP (9.95) and **nearly
+   halved** the frame-stack error (16.36), with the largest gap at high speed. **Frame-stacking
+   actively *hurt*** (worse than plain MLP) — the 4 consecutive frames are near-duplicates (state
+   barely changes in 20 ms) that dilute the signal rather than add usable history. This reproduces
+   the earlier quad-project finding that frame-stacking underperformed direct sensing.
+2. **The hand-designed features are NOT replaced by memory.** LSTM **+feat (7.49) < raw (9.05)** —
+   even with full-episode recurrent memory, adding `wind_est` + the integrator still helped
+   (gap at mid/high speed). The reason: **`wind_est` is an *instantaneous physics computation*** —
+   `m·a − F_thrust + m·g` — not a temporal *pattern* the LSTM can cheaply reconstruct from history;
+   handing it the answer beats making it re-derive it. So **keep the observer + integrator even
+   with a recurrent policy.**
+3. **Best per-sample = LSTM+feat; best practical = MLP+feat.** LSTM wins at equal *steps*, but at
+   ~3× the wall-clock; in the same wall-clock the MLP runs ~3× more steps, so the memoryless MLP +
+   features (the `tsIt` recipe) remains the pragmatic default. Frame-stacking is not recommended.
+
+### Confounds / caveats (honest)
+- **Undertrained**: 4 M, fresh, single-seed → absolute numbers are high vs the 16 M staged champion
+  (4.63). The value is the **relative** ranking, and only the **large** gaps are trustworthy
+  (LSTM-best, FS-worst, features-help-LSTM). The **MLP feat-vs-raw** cell (9.95 vs 8.56) is within
+  single-seed noise — do not over-read it.
+- **Frame-stack was under-resourced on two axes** — both the **window** (`n_stack=4` = 80 ms, far
+  short of the seconds the task needs) *and* the **net width** (132-dim input into the same
+  `[256,256]`). A fair frame-stack would need a much larger `n_stack` (e.g. 16–32) *and* a wider
+  net — but that still can't reach the LSTM's 8 s horizon, and the redundant-frames problem remains.
+- An earlier *8 M* attempt (with-integrator only) gave MLP 11.68 / FS 14.29 but was interrupted and
+  is superseded by this clean equal-budget 4 M matrix.

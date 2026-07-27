@@ -500,8 +500,31 @@ The env was converted to a **tailsitter VTOL** (2–5 kg, fixed wings, flat-plat
     no stability floor for very long training (contributes to post-saturation drift). A small
     `ent_coef` buys stability/exploration at some precision cost — only worth it past a clean
     saturation.
-13. **Don't scale the model to fix a non-representational bottleneck.** A deeper 256×256×256 net
-    lost to 256×256 (7.27 vs 4.63): the residual was sensing/corner-limited, so extra capacity
-    bought nothing and (trained fresh) was *harder* to optimize. Diagnose the bottleneck first.
-    Related: **fresh single-shot training underperformed a staged continuation** — warming up a
-    behavior then refining beat one long cold run, so compare same-schedule before blaming the net.
+13. **Don't scale the model to fix a non-representational bottleneck — and "bigger ≥ smaller"
+    doesn't hold in on-policy RL.** A deeper 256×256×256 net lost to 256×256 (7.27 vs 4.63), and
+    training it more made it *worse* (8.45 at 24M), not closer. The "bigger net is at least as
+    good" guarantee is supervised-learning reasoning (fixed data, optimization toward a global
+    optimum); on-policy RL has neither — with self-generated data, a bootstrapped critic, and
+    `ent_coef=0`, extra capacity overfits and drifts to a *worse* practical solution that more
+    steps degrade further. Diagnose the bottleneck first (ours was sensing, not capacity).
+    Related: **fresh single-shot training underperformed a staged continuation** — warm up a
+    behavior then refine, and compare same-schedule before blaming the net.
+14. **For temporal memory, LSTM > MLP > frame-stack — and the deciding factor is memory *horizon*,
+    not "memory yes/no."** In a clean equal-budget ablation (MLP / frame-stack×4 / LSTM, each with
+    and without the hand features), LSTM was best (7.49), memoryless MLP middle (~9), and
+    **frame-stacking was *worst* (16.4) — worse than no memory at all.** Reason: `n_stack=4` at
+    50 Hz is an **80 ms** window of near-duplicate frames (state barely moves in 20 ms), which
+    *dilutes* the signal; the LSTM carries hidden state over the **whole ~8 s episode** (~100× the
+    horizon), which is the scale the dynamics (wind, convergence, motor-lag) actually evolve on.
+    Frame-stacking helps only when the useful history is a handful of steps long; for
+    seconds-scale hidden state it's the wrong tool, and a bigger net can't fix the *window*.
+15. **Learned memory does NOT replace a feature that's an instantaneous physics computation.** Even
+    the LSTM did better *with* the disturbance-observer wind estimate + integrator than without
+    (7.49 vs 9.05). `wind_est = m·a − F_thrust + m·g` is an *algebraic* quantity, not a temporal
+    *pattern* a recurrent net cheaply reconstructs from history — so hand it to the policy even if
+    the policy has memory. Give the network the closed-form answer instead of making it re-derive it.
+16. **Sample-efficiency ≠ wall-clock: the LSTM won per-step but cost ~3× the training time.** LSTM
+    ran ~347 fps vs the MLP's ~1013 fps (RecurrentPPO's sequential BPTT over episode-length
+    sequences won't parallelize like a feed-forward minibatch). So per *step* LSTM was best, but per
+    *wall-clock* the MLP does ~3× more steps — the memoryless MLP + hand features stays the pragmatic
+    default. (Same "sample-efficiency isn't training speed" caveat as PPO-vs-SAC.)
