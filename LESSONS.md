@@ -471,9 +471,9 @@ The env was converted to a **tailsitter VTOL** (2–5 kg, fixed wings, flat-plat
    (256-net+random-init, then the integrator) dropped the error to a new floor that ~4 M more
    steps then flattened against. Expect step-changes from *structure*, diminishing returns from
    *more of the same*.
-7. **One variable at a time, or the result is uninterpretable.** `ts2` changed reward + episode
-   length + steps at once and taught nothing; the clean single-variable `tsI` run is what proved
-   the integrator. Continuations that stacked a second lever (`ts3d`, `tsIc`) gave misleading or
+7. **One variable at a time, or the result is uninterpretable.** `longer-episodes` changed reward + episode
+   length + steps at once and taught nothing; the clean single-variable `integrator-8M` run is what proved
+   the integrator. Continuations that stacked a second lever (`hard-corner`, `dive-curriculum`) gave misleading or
    null deltas.
 8. **Ground the spec in physics.** Deriving MAX_SPEED from a force balance showed the 50–80 m/s
    band trains against optimistic constant thrust (real prop limit ~50), and that the dive/
@@ -493,7 +493,7 @@ The env was converted to a **tailsitter VTOL** (2–5 kg, fixed wings, flat-plat
 11. **Episode length changes the training *distribution*, not just "more time."** Longer (20 s)
     episodes recovered hover but hurt high-speed, because experience shifts toward the settled
     phase and away from the reaching/transition phase. Horizon is a distribution knob, not a free
-    lever (cf. the confounded `ts2` 15 s run).
+    lever (cf. the confounded `longer-episodes` 15 s run).
 12. **`ent_coef = 0` is a precision↔stability trade-off.** For continuous control it's standard
     (SB3 default) and it *helped* — letting the Gaussian std shrink gave tight deterministic
     tracking, with exploration supplied by DR + random-init instead of action entropy. The cost is
@@ -518,6 +518,9 @@ The env was converted to a **tailsitter VTOL** (2–5 kg, fixed wings, flat-plat
     horizon), which is the scale the dynamics (wind, convergence, motor-lag) actually evolve on.
     Frame-stacking helps only when the useful history is a handful of steps long; for
     seconds-scale hidden state it's the wrong tool, and a bigger net can't fix the *window*.
+    **And it isn't an undertraining artifact:** continuing *both* to 12 M (3× the budget) improved
+    each but left the gap intact (MLP 9.95→6.60, frame-stack 16.36→13.29 — still ~2× worse, and
+    24.6 vs 8.9 in the high-speed band). More steps don't rescue the wrong memory mechanism.
 15. **Learned memory does NOT replace a feature that's an instantaneous physics computation.** Even
     the LSTM did better *with* the disturbance-observer wind estimate + integrator than without
     (7.49 vs 9.05). `wind_est = m·a − F_thrust + m·g` is an *algebraic* quantity, not a temporal

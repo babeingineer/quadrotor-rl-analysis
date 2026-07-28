@@ -192,13 +192,13 @@ ratio, bigger net) recovered it from broken (4.09 m/s, 18% crash) to a close sec
 ![PPO vs SAC](docs/fig_ppo_vs_sac.png)
 
 **Hover inference — all three runnable velocity policies** (driven as position controllers
-through the outer P-loop). PPO T6 holds tightest and flattest (0.12 m calm, 0.18 m in
-15 m/s wind); both SAC policies vibrate through the loop, and SAC T7 diverges under wind —
-the structural instability that tuning (T8) narrowed but never removed.
+through the outer P-loop). The PPO policy holds tightest and flattest (0.12 m calm, 0.18 m in
+15 m/s wind); both SAC policies vibrate through the loop, and the untuned SAC policy diverges
+under wind — the structural instability that tuning narrowed but never removed.
 
 ![Velocity policies — hover (all models)](docs/fig_all_hover_velocity.png)
 
-> The three earliest velocity models (T3 `results_sac`, T4 `results_fs`, T5 `results_sac_fs`)
+> The three earliest velocity models (`results_sac`, `results_fs`, `results_sac_fs`)
 > predate the 29-dim RPM+wind observation (their obs is 22-dim / 88-dim frame-stacked), so
 > they cannot be inferenced against the current env — they are documented by their historical
 > velocity-error numbers in `TRAINING_HISTORY.md` only.
@@ -227,12 +227,12 @@ tighter steady state.
 
 ![Hover comparison](docs/fig_hover.png)
 
-**Hover inference — all six position policies (T11→T16).** This single plot is the whole
-position story: T12's too-sharp reward (`exp σ=0.3`) makes the target *unreachable* and the
-policy drifts away (2.3 m calm, 5.4 m in wind); the reachable-width reward (T13, `σ=1.0`)
+**Hover inference — all six position policies.** This single plot is the whole
+position story: the too-sharp reward (`exp σ=0.3`) makes the target *unreachable* and the
+policy drifts away (2.3 m calm, 5.4 m in wind); the reachable-width reward (`σ=1.0`)
 recovers to 0.66 m; and **pure additional training** with an unchanged reward tightens it
-monotonically 0.66 → 0.18 → 0.11 → **0.06 m** (calm) across T13→T16, and to **0.03 m** in
-15 m/s wind. No reward trick did this — steps did.
+monotonically 0.66 → 0.18 → 0.11 → **0.06 m** (calm) across the four training-length runs,
+and to **0.03 m** in 15 m/s wind. No reward trick did this — steps did.
 
 ![Position policies — hover (all models)](docs/fig_all_hover_position.png)
 
@@ -260,7 +260,7 @@ Fixing this is known work: tune the outer loop, and/or train the position policy
 to one checkpoint. All six position policies phase-lag the moving reference (RMS 3.5–4.6 m) —
 they trace a roughly circular arc but at the wrong point at the wrong time, because every one
 was trained on *static* goals. The velocity policies + outer loop overshoot the circle on
-entry then spiral in (PPO T6 best at 2.57 m RMS); the aggressive `Kp=1.5` is the culprit.
+entry then spiral in (the PPO policy best at 2.57 m RMS); the aggressive `Kp=1.5` is the culprit.
 More training tightens *hover* but not *path tracking* — that needs training on moving targets.
 
 ![Velocity policies — circle (all models)](docs/fig_all_path_velocity.png)
@@ -342,15 +342,24 @@ observation** (the breakthrough, 8.1 → 4.8, which also acted as a "stuck-below
 and a **sharp `1−tanh(d/2)` reward peak** (the polish, 4.8 → 4.63, vs a Gaussian's flat-top
 deadband). Everything else — more training, DR removal, hard-corner oversampling, a dive
 curriculum, longer episodes, a deeper 256×256×256 net — **failed**, and past saturation extra
-steps **regressed** (4.63 → 5.35). Final policy (**`results_tsIt`**, 16 M): **calm hover 0.31 m/s, everyday tracking 2.3 m/s,
-up/level high-speed 95–99% reach, wing-borne cruise to 80 m/s, learned dives**; residual
-concentrated in the extreme **dive-into-wind** corner (a crosswind-sensing + near-limit issue).
+steps **regressed** (4.63 → 5.35). Final **champion** policy (`results_tsIt`, 16 M): **calm hover 0.31 m/s,
+everyday tracking 2.3 m/s, up/level high-speed 95–99% reach, wing-borne cruise to 80 m/s, learned
+dives**; residual concentrated in the extreme **dive-into-wind** corner (a crosswind-sensing +
+near-limit issue).
+
+**Memory study (MLP vs frame-stacking vs LSTM).** On the tailsitter task we also compared the
+memoryless MLP against a 4-frame frame-stack and an LSTM policy. Result: **LSTM > MLP >
+frame-stacking** — the LSTM (full 8 s episode horizon) tracked best per environment step but ran
+~3× slower in wall-clock; frame-stacking (~80 ms window of near-duplicate frames) was *worst*; and
+even the LSTM did better *with* the wind-estimator + integrator features than without — memory
+complements, but does not replace, good hand-designed observations. Full detail in
+[`TAILSITTER.md`](TAILSITTER.md) and [`LESSONS.md`](LESSONS.md).
 
 ```bash
 # tailsitter velocity task (baseline -> +bigger net & random-init -> +integrator -> +tanh reward)
 python train.py --timesteps 8000000 --n-envs 6 --use-integral --out-dir results_tsI
 python continue_train.py --src results_tsI  --out results_tsI2 --extra 4000000     # -> 12M
-# (then the tanh precision peak R3 in _computeReward)
+# (then the tanh precision peak reward-v3 in _computeReward)
 python continue_train.py --src results_tsI2 --out results_tsIt --extra 4000000     # -> 16M champion
 python eval_ts.py                                                                  # band + figure
 ```

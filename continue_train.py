@@ -6,7 +6,7 @@ Loads the saved model + VecNormalize stats and resumes (optimizer state included
 import argparse, json, os
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize, VecFrameStack
 from stable_baselines3.common.callbacks import CheckpointCallback
 from rate_vel_aviary import RateVelAviary
 from progress_callback import ProgressPlotCallback, DiveCurriculumCallback
@@ -25,10 +25,12 @@ def main():
     args = ap.parse_args()
 
     cfg = json.load(open(os.path.join(args.src, "config.json")))
-    assert cfg.get("n_stack", 1) == 1
-    base_kwargs = dict(task=cfg.get("task", "velocity"), episode_len_sec=args.episode_len, max_speed=80.0,
-                       pos_range=cfg.get("pos_range", 30.0), speed_cap=cfg.get("speed_cap", 18.0))
+    n_stack = cfg.get("n_stack", 1)
     ui = cfg.get("use_integral", False)   # must match the saved model's obs dim
+    uw = cfg.get("use_wind_est", True)
+    base_kwargs = dict(task=cfg.get("task", "velocity"), episode_len_sec=args.episode_len, max_speed=80.0,
+                       pos_range=cfg.get("pos_range", 30.0), speed_cap=cfg.get("speed_cap", 18.0),
+                       use_wind_est=uw)
     train_kwargs = dict(base_kwargs, randomize_init=True, hard_corner_frac=0.0, use_vel_integral=ui,
                         dive_curriculum=args.dive_curriculum)
     eval_kwargs = dict(base_kwargs, randomize_init=False, hard_corner_frac=0.0, use_vel_integral=ui)
@@ -38,6 +40,8 @@ def main():
     def norm_env(n, seed, train, nr, ekw):
         v = make_vec_env(RateVelAviary, n_envs=n, seed=seed, env_kwargs=ekw,
                          vec_env_cls=SubprocVecEnv if n > 1 else DummyVecEnv)
+        if n_stack > 1:
+            v = VecFrameStack(v, n_stack=n_stack)          # VecNormalize OUTSIDE the stack
         v = VecNormalize.load(os.path.join(args.src, "vecnormalize.pkl"), v)
         v.training = train; v.norm_reward = nr
         return v
