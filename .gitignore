@@ -5,6 +5,8 @@ results_fs/
 results_sac_fs/
 results_*/
 *.log
+*.sh
+*.done
 
 # trained models / normalization stats / replay buffers
 *.zip

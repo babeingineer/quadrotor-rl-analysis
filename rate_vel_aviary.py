@@ -1,42 +1,25 @@
-"""RateVelAviary — velocity tracking for a quadrotor TAILSITTER VTOL with domain rand.
+"""RateVelAviary — velocity + heading tracking for a quadrotor TAILSITTER VTOL.
 
-Task
-----
-Track a random 3-D target velocity. Direction uniform on the unit sphere, speed
-Uniform(0, MAX_SPEED) m/s (0 == hover). To go fast forward the airframe must pitch
-~90 deg into wing-borne (cruise) flight, then pitch back up to hover.
+Task (velyaw)
+-------------
+Two objectives held for the whole episode:
+  1. match current 3-D velocity to a target (random direction, 0..MAX_SPEED m/s);
+  2. match current heading (yaw) to a commanded desired_yaw.
+under domain randomization (mass, wind, wing area, motor lag, yaw-torque bias).
 
 Airframe (small tailsitter VTOL — 4 motors + 2 fixed wings, no control surfaces)
 --------------------------------------------------------------------------------
-* Mass randomized per episode: Uniform(MASS_MIN, MASS_MAX) kg (default 2-5).
-* 4 motors, each producing 0 .. MOTOR_MAX_THRUST N (default 40 N -> 160 N total);
-  high thrust/weight (~3-8x) so it can hover and accelerate hard.
-* 2 fixed wings generate aerodynamic LIFT + DRAG when moving through the air. Modelled
-  as a flat plate valid across the full 0-90 deg angle-of-attack range a tailsitter
-  sweeps:  CL = 2 sin(a) cos(a),  CD = CD0 + 2 sin^2(a).  Force applied at the COM,
-  no aero moment (the airframe is aerodynamically neutral — control is pure diff thrust).
-  The wing has NO actuator; attitude is set entirely by the 4 motors.
-* Wind: constant per episode, random direction, speed Uniform(0, WIND_MAX) m/s. It enters
-  only through the air-relative velocity that drives the wing aero (no separate drag term).
+* Mass Uniform(MASS_MIN, MASS_MAX) kg per episode; 4 motors, 0..MOTOR_MAX_THRUST N each.
+* 2 fixed wings: flat-plate aero valid across the full 0-90 deg AoA a tailsitter sweeps:
+  CL = 2 sin a cos a, CD = CD0 + 2 sin^2 a. Force at the COM, no aero moment.
+* Wind: constant per episode; enters through the air-relative velocity that drives the wings.
 
-Sensing / observation
-----------------------
-Attitude (rotation matrix), body rates, ground velocity, motor RPM, a single forward
-PITOT airspeed scalar (axial component of air-relative velocity — what one pitot tube
-physically reads, not the wind vector), and a disturbance-force observer that lumps
-wind + wing aero into one target-independent external-force estimate.
-
-Control architecture
---------------------
-The RL policy outputs a normalized CTBR (Collective Thrust + Body Rate) command
-[a_T, a_p, a_q, a_r] in [-1,1]^4. A PID inner loop tracks the body-rate set-point.
-Per-motor forces are clipped to [0, MOTOR_MAX_THRUST] (motor saturation couples the
-achievable thrust and torque), and the *achieved* wrench is applied analytically to
-the base link. Mass/inertia are set per episode via ``changeDynamics``; wing aero and
-gravity are applied as external forces to the real PyBullet integrator (``Physics.PYB``).
-
-Because the wrench is applied analytically, the drone geometry (arm length, yaw ratio,
-inertia) is defined here and does NOT depend on the loaded URDF's link geometry.
+Control
+-------
+Policy outputs normalized CTBR [a_T, a_p, a_q, a_r] in [-1,1]^4. A PID inner loop tracks the
+body-rate set-point at PYB_FREQ; per-motor forces are clipped (saturation couples thrust and
+torque) and the achieved wrench is applied analytically (drone geometry is defined here, not
+from the URDF). Mass/inertia set per episode; wing aero + gravity applied to the PYB integrator.
 """
 import numpy as np
 import pybullet as p
@@ -44,6 +27,7 @@ from gymnasium import spaces
 
 from gym_pybullet_drones.envs.BaseAviary import BaseAviary
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
+from aero_xwing import func_aero_model
 
 
 class RateVelAviary(BaseAviary):
@@ -56,70 +40,94 @@ class RateVelAviary(BaseAviary):
                  gui: bool = False,
                  record: bool = False,
                  # --- task ---
-                 task: str = "velocity",      # "velocity" or "position"
                  episode_len_sec: float = 8.0,
-                 max_speed: float = 80.0,
-                 pos_range: float = 30.0,     # position task: target radius (m); sets max cruise speed
-                 speed_cap: float = 18.0,     # position task: soft speed cap (m/s)
+                 max_speed: float = 25.0,
+                 speed_min: float = 0.0,          # min target speed: band-limited specialists
                  # --- airframe / domain randomization (small tailsitter VTOL) ---
-                 mass_range=(2.0, 5.0),       # kg, sampled per episode
+                 mass_range=(2.0, 5.0),
                  motor_max_thrust: float = 40.0,   # N per motor (4 -> 160 N total)
-                 arm_length: float = 0.30,    # m (center to motor)
-                 yaw_ratio: float = 0.02,     # KM/KF, motor drag-torque per thrust (m)
+                 arm_length: float = 0.30,
+                 yaw_ratio: float = 0.02,          # KM/KF, motor drag-torque per thrust (m)
                  inertia_nominal=(0.06, 0.03, 0.06),  # kg m^2 at NOMINAL_MASS (scales w/ mass)
-                 # --- exploration: start in varied states (teach inversion/dive + high-speed) ---
-                 randomize_init: bool = False,  # 50% random attitude (incl. inverted) + random vel
-                 hard_corner_frac: float = 0.0,  # fraction of TRAINING targets oversampled at the
-                 #                                 weak corners (high-speed + downward-biased). 0 =
-                 #                                 uniform (use for eval so the metric stays comparable)
-                 use_wind_est: bool = True,       # include the disturbance-observer wind estimate in obs
-                 use_vel_integral: bool = False,  # add a leaky+clamped velocity-error integral to obs
-                 integral_tau: float = 3.0,       # leak time constant (s): anti-windup + forgets old
-                 #                                  setpoint transients so it works with changing targets
-                 dive_curriculum: bool = False,   # TRAINING: oversample downward dives whose steepness
-                 #                                  and speed ramp with self.dive_level (set by callback)
-                 dive_frac: float = 0.3,          # fraction of targets drawn from the dive curriculum
-                 # --- wind ---
-                 wind_max: float = 20.0,      # m/s
-                 # --- fixed-wing aerodynamics (flat plate; no control surfaces) ---
-                 wing_area: float = 0.40,     # m^2 total lifting area (randomized per episode)
-                 wing_area_jitter: float = 0.20,  # +/- fraction sampled per episode
-                 air_density: float = 1.225,  # kg/m^3
-                 cd0: float = 0.05,           # parasitic drag coeff (flat plate adds 2 sin^2 a)
-                 pitot_noise: float = 0.0,    # m/s std of forward-airspeed sensor noise
-                 # --- motor dynamics (first-order lag toward commanded thrust) ---
-                 motor_tau_range=(0.10, 0.25),  # s, time constant sampled per episode (0 = ideal)
+                 randomize_init: bool = False,     # gentle +-40 deg tilt + random vel/heading start
+                 tough_init_frac: float = 0.0,     # fraction of episodes started in FAILURE states
+                 #                                   (developed dive / botched transition) so the
+                 #                                   policy gets direct gradient on recovery
+                 # --- observation features ---
+                 use_wind_est: bool = True,        # disturbance-observer external-force estimate
+                 use_vel_integral: bool = True,    # leaky+clamped velocity-error integral
+                 use_yaw_integral: bool = True,    # leaky+clamped yaw-error integral
+                 integral_tau: float = 3.0,        # leak time constant (s): anti-windup + forgets old
+                 # --- heading objective ---
+                 yaw_reward_width: float = 0.35,   # rad; sharp-peak width of the heading reward
+                 yaw_weight: float = 1.0,          # weight of the heading objective in the reward
+                 yaw_bias_max: float = 0.0,        # N*m; per-episode constant yaw-torque disturbance
+                 yaw_gate: bool = False,           # gate the yaw reward by velocity success, so
+                 #                                   "track yaw while diving" stops being a local optimum
+                 yaw_gate_floor: float = 0.2,      # fraction of the yaw reward that always pays
+                 #                                   (higher -> more yaw pressure at high vel error)
+                 vel_precision: float = 0.0,       # weight of an extra NARROW velocity peak
+                 #                                   (1 - tanh(d/0.5)): gradient below ~1 m/s, where
+                 #                                   the d/2 peak is already ~flat
+                 cov_width: float = 0.0,           # wide-coverage Gaussian width (m/s); 0 = legacy
+                 #                                   10*(MAX_SPEED/20). 12.5 pays 75% at 9.5 m/s err
+                 #                                   -> subsidizes not transitioning; ~5 fixes that
+                 yaw_att_gate: bool = False,       # scale yaw reward by clip(R22,0,1): yaw enforced in
+                 #                                   hover (controllable) and released in wing-borne
+                 #                                   cruise, where the nose must follow the velocity
+                 #                                   vector and a random desired_yaw is unsatisfiable
+                 velyaw_heading_frame: bool = False,  # express vel error in the current-heading frame
+                 # --- wind / aero ---
+                 wind_max: float = 20.0,
+                 wing_area: float = 0.40,
+                 wing_area_jitter: float = 0.20,
+                 air_density: float = 1.225,
+                 cd0: float = 0.05,
+                 pitot_noise: float = 0.0,
+                 # --- aerodynamic MOMENT (static weathervane stability + rate damping) ---
+                 use_aero_moment: bool = False,  # off -> force-only aero (legacy); on -> realistic moment
+                 cp_offset: float = 0.06,        # m, aero center-of-pressure aft of COM (static stiffness)
+                 aero_damp: float = 0.6,         # aerodynamic rate-damping coefficient
+                 chord: float = 0.5,             # m, aerodynamic chord (moment-arm scale)
+                 # --- XWing aero model (full funcAeroModel port) + XWing mass/motor power ---
+                 use_xwing_aero: bool = False,   # replace aero with the ported XWing model + XWing airframe
+                 aero_dr: bool = True,           # per-episode aero randomization (17 coeffs +/-20% + Xg
+                 #                                 jitter); False = fixed NOMINAL aircraft (ablation)
+                 aero_s: float = 1.0, aero_c: float = 1.0, aero_b: float = 1.0,  # aero reference dims
+                 # --- motor dynamics (first-order lag) ---
+                 motor_tau_range=(0.10, 0.25),
                  # --- CTBR command limits ---
-                 max_rate_rp: float = 4.0,    # rad/s roll & pitch rate range
-                 max_rate_yaw: float = 2.0,   # rad/s yaw rate range
-                 # --- inner-loop rate PID gains (angular-accel per rate error) ---
-                 # NB: gains lowered vs the ideal-motor env — a 0.1-0.25 s actuator lag
-                 # in the loop cuts phase margin, so high gains would oscillate.
+                 max_rate_rp: float = 4.0,
+                 max_rate_yaw: float = 2.0,
+                 # --- inner-loop rate PID gains (lowered vs ideal-motor: lag cuts phase margin) ---
                  kp_rate=(6.0, 6.0, 4.0),
                  ki_rate=(0.5, 0.5, 0.3),
                  int_limit: float = 5.0,
                  ):
         # ---- config (must be set before super().__init__ -> _housekeeping) ----
-        assert task in ("velocity", "position"), task
-        self.TASK = task
         self.EPISODE_LEN_SEC = episode_len_sec
         self.MAX_SPEED = float(max_speed)
-        self.POS_RANGE = float(pos_range)
-        self.SPEED_CAP = float(speed_cap)
+        self.SPEED_MIN = float(speed_min)
         self.MASS_RANGE = (float(mass_range[0]), float(mass_range[1]))
         self.MOTOR_MAX = float(motor_max_thrust)
         self.ARM = float(arm_length)
         self.YAW_RATIO = float(yaw_ratio)
-        self.J_NOMINAL = np.array(inertia_nominal, dtype=float)   # at NOMINAL_MASS
+        self.J_NOMINAL = np.array(inertia_nominal, dtype=float)
         self.RANDOMIZE_INIT = bool(randomize_init)
-        self.HARD_CORNER_FRAC = float(hard_corner_frac)
+        self.TOUGH_INIT_FRAC = float(tough_init_frac)
         self.USE_WIND_EST = bool(use_wind_est)
         self.USE_VEL_INTEGRAL = bool(use_vel_integral)
+        self.USE_YAW_INTEGRAL = bool(use_yaw_integral)
         self.INTEGRAL_TAU = float(integral_tau)
-        self.vel_integral = np.zeros(3)          # leaky velocity-error integral (obs feature)
-        self.DIVE_CURRICULUM = bool(dive_curriculum)
-        self.DIVE_FRAC = float(dive_frac)
-        self.dive_level = 1.0                    # 0=shallow/slow dives .. 1=steep/fast (callback ramps)
+        self.YAW_REWARD_WIDTH = float(yaw_reward_width)
+        self.YAW_WEIGHT = float(yaw_weight)
+        self.YAW_BIAS_MAX = float(yaw_bias_max)
+        self.YAW_GATE = bool(yaw_gate)
+        self.YAW_GATE_FLOOR = float(yaw_gate_floor)
+        self.VEL_PRECISION = float(vel_precision)
+        self.COV_WIDTH = float(cov_width)
+        self.YAW_ATT_GATE = bool(yaw_att_gate)
+        self.VELYAW_HEADING_FRAME = bool(velyaw_heading_frame)
         self.WIND_MAX = float(wind_max)
         self.MOTOR_TAU_RANGE = (float(motor_tau_range[0]), float(motor_tau_range[1]))
         self.MAX_RATE = np.array([max_rate_rp, max_rate_rp, max_rate_yaw], dtype=float)
@@ -129,16 +137,49 @@ class RateVelAviary(BaseAviary):
 
         self.MAX_TOTAL_THRUST = 4.0 * self.MOTOR_MAX             # 160 N
         self.NOMINAL_MASS = 3.5                                  # mass used by onboard estimator/hover
-        self.NOMINAL_HOVER = self.NOMINAL_MASS * 9.8             # thrust at a_T=0 (nominal 3.5 kg)
-        self.MOTOR_MAX_RPM = 8000.0                              # for force<->RPM reporting (ESC units)
-        self.WIND_EST_ALPHA = 0.5                                # EMA filter on disturbance estimate
-        # fixed-wing aero params (flat plate; force at COM, no moment)
+        self.NOMINAL_HOVER = self.NOMINAL_MASS * 9.8            # thrust at a_T=0
+        self.MOTOR_MAX_RPM = 8000.0
+        self.WIND_EST_ALPHA = 0.5                               # EMA on disturbance estimate
         self.WING_AREA_NOM = float(wing_area)
         self.WING_JITTER = float(wing_area_jitter)
         self.RHO = float(air_density)
         self.CD0 = float(cd0)
         self.PITOT_NOISE = float(pitot_noise)
-        self.wing_area = self.WING_AREA_NOM                      # per-episode (set in _housekeeping)
+        self.wing_area = self.WING_AREA_NOM
+        self.USE_AERO_MOMENT = bool(use_aero_moment)
+        self.CP_OFFSET = float(cp_offset)
+        self.AERO_DAMP = float(aero_damp)
+        self.CHORD = float(chord)
+        # --- XWing aero model + XWing airframe (mass / inertia / motor power) ---
+        self.USE_XWING_AERO = bool(use_xwing_aero)
+        self.AERO_DR = bool(aero_dr)
+        self.AERO_S = float(aero_s); self.AERO_C = float(aero_c); self.AERO_B = float(aero_b)
+        self.XG, self.YG, self.ZG = 0.4045, -0.00062, 0.0  # XWing aero CoM (drives the moment coeffs;
+        #                                                    randomized +/-0.02 per episode like the DLL —
+        #                                                    the stability coeffs are hypersensitive to Xg)
+        self.aero_rand = np.ones(17)                       # per-episode aero DR (set in _housekeeping)
+        if self.USE_XWING_AERO:
+            self.MASS_RANGE = (13.6, 14.1)                 # heavy XWing airframe
+            self.NOMINAL_MASS = 13.85
+            self.J_NOMINAL = np.array([1.47, 0.46, 1.39])  # XWing nominal inertia (Ixx, Iyy, Izz)
+            self.MOTOR_MAX = 110.0                         # N per motor (11 kgf class) -> T/W ~3.2
+            self.MAX_TOTAL_THRUST = 4.0 * self.MOTOR_MAX
+            self.NOMINAL_HOVER = self.NOMINAL_MASS * 9.8
+            self.MOTOR_TAU_RANGE = (0.025, 0.16)           # real XWing motor time constants (from DLL)
+            if tuple(np.asarray(kp_rate, dtype=float)) == (6.0, 6.0, 4.0):   # caller used old default
+                self.KP_RATE = np.array([25.0, 25.0, 15.0])    # stiffer rate loop for the strong aero
+                self.KI_RATE = np.array([6.0, 6.0, 3.0])       #   (stable at the faster XWing lag)
+            self.INT_LIMIT = max(self.INT_LIMIT, 15.0)
+        # --- elevons (XWing only): action[0:2] = left/right fin, aero via de/da terms.
+        # Motor torque is ~constant with airspeed but the weathervane moment grows with V^2;
+        # elevon authority also grows with V^2 — the only actuator that keeps pace at speed.
+        self.USE_ELEVONS = self.USE_XWING_AERO
+        self.ACT_DIM = 6 if self.USE_ELEVONS else 4
+        self.FIN_MAX = np.radians(20.0)                     # rad; real elevon limit -20..+20 deg
+        self.FIN_TAU = 0.03                                 # s, servo first-order lag
+        self.fin_angles = np.zeros(2)                       # actual (lagged) deflections (rad)
+        self.fin_gain = np.ones(2)                          # per-episode servo gain DR (DLL: 1 +/- 0.1)
+        self.fin_offset = np.zeros(2)                       # per-episode mounting offset (rad)
 
         if initial_xyzs is None:
             initial_xyzs = np.array([[0.0, 0.0, 2.0]])
@@ -148,15 +189,18 @@ class RateVelAviary(BaseAviary):
         self.J_DIAG = self.J_NOMINAL.copy()
         self.wind = np.zeros(3)
         self.target_vel = np.zeros(3)
-        self.target_pos = np.zeros(3)        # position task
+        self.desired_yaw = 0.0
+        self.yaw_bias = 0.0
         self.rate_integral = np.zeros(3)
-        self.current_action = np.zeros(4)
-        self.prev_action = np.zeros(4)
-        self.motor_tau = 0.0                 # per-episode motor time constant (s)
-        self.motor_alpha = 1.0               # per-substep smoothing = 1-exp(-dt/tau)
-        self.motor_forces = np.zeros(4)      # actual (lagged) per-motor thrust (N)
-        self.prev_vel = np.zeros(3)          # velocity at previous step (for accel estimate)
-        self.wind_est = np.zeros(3)          # disturbance-observer wind force estimate (N, world)
+        self.current_action = np.zeros(self.ACT_DIM)
+        self.prev_action = np.zeros(self.ACT_DIM)
+        self.motor_tau = 0.0
+        self.motor_alpha = 1.0
+        self.motor_forces = np.zeros(4)
+        self.prev_vel = np.zeros(3)
+        self.wind_est = np.zeros(3)
+        self.vel_integral = np.zeros(3)
+        self.yaw_integral = 0.0
 
         super().__init__(drone_model=DroneModel.CF2X,  # URDF only for body/visual; dynamics overridden
                          num_drones=1,
@@ -170,9 +214,7 @@ class RateVelAviary(BaseAviary):
                          obstacles=False,
                          user_debug_gui=False)
 
-        # ---- control mixer: [T, tau_x, tau_y, tau_z] = MIX @ [f0,f1,f2,f3] ----
-        # X-config, motor moment arm a = ARM/sqrt(2); yaw torque per force = YAW_RATIO.
-        # Motor sign convention matches BaseAviary._dynamics CF2X.
+        # ---- control mixer: [T, tau_x, tau_y, tau_z] = MIX @ [f0,f1,f2,f3] (X-config, CF2X signs)
         a = self.ARM / np.sqrt(2.0)
         b = self.YAW_RATIO
         self.MIX = np.array([[1.0, 1.0, 1.0, 1.0],
@@ -183,75 +225,149 @@ class RateVelAviary(BaseAviary):
 
     # ------------------------------------------------------------------ spaces
     def _actionSpace(self):
-        return spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
+        return spaces.Box(low=-1.0, high=1.0, shape=(self.ACT_DIM,), dtype=np.float32)
 
     def _observationSpace(self):
-        # base 27 = [vel_err(3), target_vel(3), R(9), omega_body(3), last_action(4),
-        #            motor_rpm(4), pitot_airspeed(1)]
-        # + ext_force_est(3) if use_wind_est  (=30)   + vel_err_integral(3) if use_vel_integral (=33)
-        dim = 27 + (3 if self.USE_WIND_EST else 0) + (3 if self.USE_VEL_INTEGRAL else 0)
+        # 27 = vel_err(3) + target_vel(3) + R(9) + omega_body(3) + last_action(4) + motor_rpm(4)
+        #    + pitot(1); + wind_est(3), + vel_integral(3), + [sin,cos dpsi](2), + yaw_integral(1)
+        # elevons add: last_action grows 4->6 (+2) and actual fin deflections (+2, servo state —
+        # same "sense the actuator" rationale as motor RPM)
+        dim = 27 + (3 if self.USE_WIND_EST else 0) + (3 if self.USE_VEL_INTEGRAL else 0) \
+              + 2 + (1 if self.USE_YAW_INTEGRAL else 0) + (4 if self.USE_ELEVONS else 0)
         return spaces.Box(low=-np.inf, high=np.inf, shape=(dim,), dtype=np.float32)
+
+    # ---------------------------------------------------------------- heading
+    def _current_yaw(self, R):
+        """Heading = azimuth of body-x (nose) in the world horizontal plane. Well-conditioned
+        except near body-x vertical (extreme tilt), which the <=25 m/s envelope never forces."""
+        nose = R[:, 0]
+        return float(np.arctan2(nose[1], nose[0]))
+
+    def _yaw_error(self, R):
+        """Signed, wrap-safe heading error dpsi = wrap(psi - desired_yaw) in [-pi, pi]."""
+        dpsi = self._current_yaw(R) - self.desired_yaw
+        return float(np.arctan2(np.sin(dpsi), np.cos(dpsi)))
+
+    # -------------------------------------------------- curriculum / tough init
+    def set_wind_max(self, w):
+        """Curriculum knob (called via env_method): per-episode wind is U(0, WIND_MAX)."""
+        self.WIND_MAX = float(w)
+
+    def _quat_z_along(self, d, roll=0.0, scatter_deg=0.0):
+        """Quaternion whose body-z (prop/cruise axis) points along unit vector d, with a given
+        roll about that axis and optional random angular scatter."""
+        z = np.array([0.0, 0.0, 1.0])
+        axis = np.cross(z, d)
+        n = np.linalg.norm(axis)
+        if n < 1e-8:
+            q = [0.0, 0.0, 0.0, 1.0] if d[2] > 0 else [1.0, 0.0, 0.0, 0.0]
+        else:
+            q = p.getQuaternionFromAxisAngle((axis / n).tolist(),
+                                             float(np.arccos(np.clip(z @ d, -1.0, 1.0))))
+        q_roll = p.getQuaternionFromAxisAngle(d.tolist(), float(roll))
+        _, q = p.multiplyTransforms([0, 0, 0], q_roll, [0, 0, 0], q)
+        if scatter_deg > 0.0:
+            ax = self.np_random.normal(size=3); ax /= (np.linalg.norm(ax) + 1e-9)
+            qs = p.getQuaternionFromAxisAngle(ax.tolist(), float(np.radians(scatter_deg)))
+            _, q = p.multiplyTransforms([0, 0, 0], qs, [0, 0, 0], list(q))
+        return np.array(q)
+
+    def _sample_tough_init(self):
+        """FAILURE-state starts, so recovery gets direct on-policy gradient:
+        50% developed dive (30-50 m/s steeply down, nose near-aligned with the flow = the
+        weathervaned state the policy actually gets trapped in), 50% botched transition
+        (60-120 deg tilt at 15-30 m/s, tumbling)."""
+        if self.np_random.uniform() < 0.5:
+            az = self.np_random.uniform(-np.pi, np.pi)
+            elev = np.radians(self.np_random.uniform(40.0, 90.0))
+            d = np.array([np.cos(elev) * np.cos(az), np.cos(elev) * np.sin(az), -np.sin(elev)])
+            v = d * self.np_random.uniform(30.0, 50.0)
+            quat = self._quat_z_along(d, roll=self.np_random.uniform(-np.pi, np.pi),
+                                      scatter_deg=self.np_random.uniform(0.0, 25.0))
+            w = self.np_random.uniform(-1.0, 1.0, size=3)
+        else:
+            a0 = self.np_random.uniform(-np.pi, np.pi)
+            tilt = np.radians(self.np_random.uniform(60.0, 120.0))
+            q1 = p.getQuaternionFromAxisAngle([np.cos(a0), np.sin(a0), 0.0], float(tilt))
+            qy = p.getQuaternionFromAxisAngle([0.0, 0.0, 1.0],
+                                              float(self.np_random.uniform(-np.pi, np.pi)))
+            _, quat = p.multiplyTransforms([0, 0, 0], qy, [0, 0, 0], q1)
+            quat = np.array(quat)
+            dv = self.np_random.normal(size=3)
+            dv[2] = -abs(dv[2]) * 0.5                       # horizontal-ish, slightly sinking
+            dv /= (np.linalg.norm(dv) + 1e-9)
+            v = dv * self.np_random.uniform(15.0, 30.0)
+            w = self.np_random.uniform(-2.0, 2.0, size=3)
+        return quat, v, w
 
     # ------------------------------------------------- reset / domain random.
     def _housekeeping(self):
         super()._housekeeping()
         self.rate_integral = np.zeros(3)
-        self.current_action = np.zeros(4)
-        self.prev_action = np.zeros(4)
+        self.current_action = np.zeros(self.ACT_DIM)
+        self.prev_action = np.zeros(self.ACT_DIM)
 
-        # --- randomize airframe mass + inertia (inertia scales with mass) ---
+        # mass + inertia (inertia scales with mass)
         self.M = float(self.np_random.uniform(*self.MASS_RANGE))
         self.J_DIAG = self.J_NOMINAL * (self.M / self.NOMINAL_MASS)
-        p.changeDynamics(int(self.DRONE_IDS[0]), -1,
-                         mass=self.M,
+        p.changeDynamics(int(self.DRONE_IDS[0]), -1, mass=self.M,
                          localInertiaDiagonal=self.J_DIAG.tolist(),
-                         linearDamping=0.0, angularDamping=0.0,
-                         physicsClientId=self.CLIENT)
+                         linearDamping=0.0, angularDamping=0.0, physicsClientId=self.CLIENT)
 
-        # --- randomize wind (constant per episode) ---
+        # wind (constant per episode)
         wdir = self.np_random.normal(size=3)
         n = np.linalg.norm(wdir)
         wdir = wdir / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
         self.wind = wdir * self.np_random.uniform(0.0, self.WIND_MAX)
 
-        # --- randomize wing area (aero domain randomization) ---
+        # wing area + motor lag (hidden per-episode parameters)
         self.wing_area = self.WING_AREA_NOM * (
             1.0 + self.np_random.uniform(-self.WING_JITTER, self.WING_JITTER))
-
-        # --- randomize motor lag (hidden parameter; per-episode time constant) ---
+        # XWing aero coefficient randomization (17 multipliers, +/-20% per episode, as in the DLL),
+        # and aero-CoM Xg = 0.4045 +/- 0.02 (DLL's dXg) — MYB/MZA stability coeffs are near their
+        # Xg zero-crossings, so this randomization meaningfully varies static stability.
+        if self.USE_XWING_AERO and self.AERO_DR:
+            self.aero_rand = 1.0 + self.np_random.uniform(-0.20, 0.20, size=17)
+            self.XG = 0.4045 + self.np_random.uniform(-0.02, 0.02)
+        else:
+            self.aero_rand = np.ones(17)
+            self.XG = 0.4045
+        # elevon servo DR (DLL: Fin gain 1 +/- 0.1, small mounting offset) + reset servo state
+        self.fin_angles = np.zeros(2)
+        self.fin_gain = 1.0 + self.np_random.uniform(-0.10, 0.10, size=2)
+        self.fin_offset = self.np_random.uniform(-0.02, 0.02, size=2)   # rad (~1 deg)
         self.motor_tau = float(self.np_random.uniform(*self.MOTOR_TAU_RANGE))
         self.motor_alpha = (1.0 if self.motor_tau <= 1e-6
                             else 1.0 - np.exp(-self.PYB_TIMESTEP / self.motor_tau))
-        self.motor_forces = np.full(4, self.M * 9.8 / 4.0)   # start at hover equilibrium
+        self.motor_forces = np.full(4, self.M * 9.8 / 4.0)
+
+        # reset estimators/integrals; sample heading target + yaw-torque disturbance
         self.prev_vel = np.zeros(3)
         self.wind_est = np.zeros(3)
-        self.vel_integral = np.zeros(3)                      # reset integral each episode
+        self.vel_integral = np.zeros(3)
+        self.yaw_integral = 0.0
+        self.desired_yaw = float(self.np_random.uniform(-np.pi, np.pi))
+        self.yaw_bias = float(self.np_random.uniform(-self.YAW_BIAS_MAX, self.YAW_BIAS_MAX))
 
-        # --- randomize initial state (attitude incl. inverted + velocity) so the policy
-        # explores inversion/dive and high-speed regimes it never reaches from a level hover.
-        # 50% keep the easy level-at-rest start so hover stays learnable.
+        # gentle VTOL init: roll/pitch +-40 deg (never inverted -> no gimbal lock), yaw 360 deg,
+        # velocity any direction up to MAX_SPEED, gentle body rates.
         if self.RANDOMIZE_INIT:
             did = int(self.DRONE_IDS[0])
-            if self.np_random.uniform() < 0.5:
-                quat = np.array([0.0, 0.0, 0.0, 1.0])            # level
+            if self.np_random.uniform() < self.TOUGH_INIT_FRAC:
+                quat, v, w = self._sample_tough_init()      # dive / botched-transition start
             else:
-                q = self.np_random.normal(size=4); quat = q / np.linalg.norm(q)  # uniform SO(3)
-            v = np.zeros(3)
-            if self.np_random.uniform() < 0.5:
-                dv = self.np_random.normal(size=3)
-                if self._sample_hard_corner():                   # start already diving fast
-                    dv[2] = -abs(dv[2]) - self.np_random.uniform(0.0, 1.0)
-                    dv /= (np.linalg.norm(dv) + 1e-9)
-                    v = dv * self.np_random.uniform(0.5, 1.0) * self.MAX_SPEED
-                else:
-                    dv /= (np.linalg.norm(dv) + 1e-9)
-                    v = dv * self.np_random.uniform(0.0, self.MAX_SPEED)
-            w = self.np_random.uniform(-2.0, 2.0, size=3)        # small random body rates
+                rr = self.np_random.uniform(np.radians(-40.0), np.radians(40.0))
+                pp = self.np_random.uniform(np.radians(-40.0), np.radians(40.0))
+                yy = self.np_random.uniform(-np.pi, np.pi)
+                quat = np.array(p.getQuaternionFromEuler([rr, pp, yy]))
+                dv = self.np_random.normal(size=3); dv /= (np.linalg.norm(dv) + 1e-9)
+                v = dv * self.np_random.uniform(0.0, self.MAX_SPEED)
+                w = self.np_random.uniform(-1.0, 1.0, size=3)
             p.resetBasePositionAndOrientation(did, self.pos[0].tolist(), quat.tolist(),
                                               physicsClientId=self.CLIENT)
             p.resetBaseVelocity(did, v.tolist(), w.tolist(), physicsClientId=self.CLIENT)
             self._updateAndStoreKinematicInformation()
-            self.prev_vel = self.vel[0].copy()                   # avoid a spurious first-step accel
+            self.prev_vel = self.vel[0].copy()
 
         self._resample_target()
 
@@ -259,49 +375,15 @@ class RateVelAviary(BaseAviary):
         p.setCollisionFilterPair(int(self.PLANE_ID), int(self.DRONE_IDS[0]),
                                  -1, -1, enableCollision=0, physicsClientId=self.CLIENT)
 
-    def set_dive_level(self, level):
-        """Curriculum knob (set by callback via env_method): 0=shallow/slow, 1=steep/fast dives."""
-        self.dive_level = float(np.clip(level, 0.0, 1.0))
-
-    def _sample_hard_corner(self):
-        """True if this episode's target should be oversampled at a weak corner."""
-        return self.HARD_CORNER_FRAC > 0.0 and self.np_random.uniform() < self.HARD_CORNER_FRAC
-
-    def _sample_curriculum_dive(self):
-        """Downward target whose dive angle (10deg->90deg below horizontal) and speed both ramp
-        with dive_level, so the policy learns to commit to dives progressively."""
-        elev = np.radians(10.0 + 80.0 * self.dive_level) * self.np_random.uniform(0.3, 1.0)
-        az = self.np_random.uniform(0.0, 2.0 * np.pi)
-        d = np.array([np.cos(elev) * np.cos(az), np.cos(elev) * np.sin(az), -np.sin(elev)])
-        speed = self.np_random.uniform(0.3, 1.0) * (40.0 + 40.0 * self.dive_level)
-        return d * speed
-
     def _resample_target(self):
         d = self.np_random.normal(size=3)
         n = np.linalg.norm(d)
         d = d / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
-        if self.TASK == "velocity":
-            if self.DIVE_CURRICULUM and self.np_random.uniform() < self.DIVE_FRAC:
-                self.target_vel = self._sample_curriculum_dive()
-            elif self._sample_hard_corner():
-                # weak corners (measured): high-speed, and 60% downward-biased. Diving and
-                # high-speed-into-wind are physically feasible but rare under uniform sampling,
-                # so PPO under-trains them; oversampling here gives them gradient. Eval stays
-                # uniform (HARD_CORNER_FRAC=0), so this only reshapes training.
-                d = self.np_random.normal(size=3)
-                if self.np_random.uniform() < 0.6:
-                    d[2] = -abs(d[2]) - self.np_random.uniform(0.0, 1.0)   # push downward
-                d = d / (np.linalg.norm(d) + 1e-9)
-                self.target_vel = d * self.np_random.uniform(0.5, 1.0) * self.MAX_SPEED
-            else:
-                self.target_vel = d * self.np_random.uniform(0.0, self.MAX_SPEED)
-        else:  # position: target within POS_RANGE of the current position (incl. near 0)
-            dist = self.np_random.uniform(0.0, self.POS_RANGE)
-            self.target_pos = self.pos[0] + d * dist
+        self.target_vel = d * self.np_random.uniform(self.SPEED_MIN, self.MAX_SPEED)
 
     # ------------------------------------------------------- CTBR decode + PID
     def _decode_action(self, action):
-        a = np.clip(np.asarray(action, dtype=float).reshape(4), -1.0, 1.0)
+        a = np.clip(np.asarray(action, dtype=float).reshape(-1)[-4:], -1.0, 1.0)
         a_T = a[0]
         if a_T >= 0.0:
             thrust = self.NOMINAL_HOVER + a_T * (self.MAX_TOTAL_THRUST - self.NOMINAL_HOVER)
@@ -313,33 +395,36 @@ class RateVelAviary(BaseAviary):
     def _control_wrench(self, thrust_des, omega_des):
         """PID rate inner loop -> achieved (T, tau_body) after per-motor saturation."""
         R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
-        omega_body = R.T @ self.ang_v[0]                      # world -> body rates
+        omega_body = R.T @ self.ang_v[0]
         err = omega_des - omega_body
         self.rate_integral = np.clip(self.rate_integral + err * self.PYB_TIMESTEP,
                                      -self.INT_LIMIT, self.INT_LIMIT)
         ang_acc = self.KP_RATE * err + self.KI_RATE * self.rate_integral
         tau_des = self.J_DIAG * ang_acc
         forces_cmd = self.MIX_INV @ np.array([thrust_des, tau_des[0], tau_des[1], tau_des[2]])
-        forces_cmd = np.clip(forces_cmd, 0.0, self.MOTOR_MAX)  # motor saturation (0..40 N)
-        # first-order motor lag: actual thrust relaxes toward the command each substep
-        self.motor_forces += (forces_cmd - self.motor_forces) * self.motor_alpha
-        wrench = self.MIX @ self.motor_forces                 # achieved [T, tau_x, tau_y, tau_z]
+        forces_cmd = np.clip(forces_cmd, 0.0, self.MOTOR_MAX)  # motor saturation
+        self.motor_forces += (forces_cmd - self.motor_forces) * self.motor_alpha  # first-order lag
+        wrench = self.MIX @ self.motor_forces
         return R, wrench[0], wrench[1:]
 
     def _preprocessAction(self, action):
-        # Not used (step() overrides the substep loop); kept for BaseAviary API.
-        return np.zeros((1, 4))
+        return np.zeros((1, 4))   # unused (step() overrides the substep loop); kept for BaseAviary API
 
     def _wing_aero(self, R):
-        """Flat-plate wing aerodynamic force (world frame), applied at COM, no moment.
-        Frame: normal n=body-x, span s=body-y, chord=body-z (= thrust/prop axis, which
-        points up in hover and forward in cruise). Angle of attack a is measured from the
-        wing plane: sin a = n . vhat.  CL = 2 sin a cos a, CD = CD0 + 2 sin^2 a. Lift acts
-        perpendicular to the relative wind and to the span; drag opposes the relative wind."""
-        v_rel = self.vel[0] - self.wind                  # aircraft velocity through the air
+        """Flat-plate wing FORCE (world) and, if use_aero_moment, the aero MOMENT.
+        Force at COM: normal n=body-x, span s=body-y; AoA from sin a = n.vhat;
+        CL = 2 sin a cos a, CD = CD0 + 2 sin^2 a; lift perp to wind and span.
+        Moment = static (weathervane) + rate damping:
+          * static: the force acts at a center of pressure CP_OFFSET aft of the COM along the
+            chord (-body-z), giving M = r_cp x F. This is a restoring moment that grows with V^2
+            and opposes rotating away from wind-alignment -> the airspeed-dependent control-
+            authority limit a real winged body has (a sustained high rate becomes impossible as V
+            rises), matching the XWing behavior. Force-only (moment=0) is the legacy default.
+          * damping: -AERO_DAMP * 0.5 rho V S c^2 * omega_body, opposing body rates (grows with V)."""
+        v_rel = self.vel[0] - self.wind
         V = float(np.linalg.norm(v_rel))
         if V < 1e-4:
-            return np.zeros(3)
+            return np.zeros(3), np.zeros(3)
         vhat = v_rel / V
         n_hat, s_hat = R[:, 0], R[:, 1]
         sin_a = float(np.clip(n_hat @ vhat, -1.0, 1.0))
@@ -348,44 +433,90 @@ class RateVelAviary(BaseAviary):
         CL = 2.0 * sin_a * cos_a
         CD = self.CD0 + 2.0 * sin_a * sin_a
         f_drag = -CD * qS * vhat
-        cross = np.cross(vhat, s_hat)                    # perpendicular to wind and span
+        cross = np.cross(vhat, s_hat)
         nc = float(np.linalg.norm(cross))
         f_lift = (CL * qS / nc) * cross if nc > 1e-6 else np.zeros(3)
-        return f_lift + f_drag
+        F = f_lift + f_drag
+        if not self.USE_AERO_MOMENT:
+            return F, np.zeros(3)
+        r_cp = -self.CP_OFFSET * R[:, 2]                       # CoP aft of COM along chord (-body-z)
+        M_static = np.cross(r_cp, F)
+        omega_body = R.T @ self.ang_v[0]
+        M_damp_body = -self.AERO_DAMP * 0.5 * self.RHO * V * self.wing_area * self.CHORD ** 2 * omega_body
+        return F, M_static + R @ M_damp_body
+
+    # map my body frame (z=prop/cruise-fwd, x=wing-normal/lift, y=span) -> XWing aero model frame.
+    # The XWing model is Y-UP (verified from its wind->body transform Twb = rotz(alpha)*roty(beta):
+    # u=Va ca cb, v=-Va sa cb, w=Va sb -> alpha=atan2(-v,u) about z, beta=asin(w/Va) about y;
+    # lift cy=f(alpha) on y, side cz=f(beta) on z). So: model_x(fwd)=my_z, model_y(lift)=my_x,
+    # model_z(side)=my_y — a cyclic permutation (proper rotation, det=+1).
+    _P_XW = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+
+    def _xwing_aero(self, R):
+        """Full ported XWing aerodynamic model (aero_xwing.func_aero_model), including the two
+        elevons (actual lagged servo deflections; de/da enter the model's force+moment terms).
+        Returns (force, moment) in WORLD frame. alpha/beta/Va and body rates are computed in the
+        XWing model frame via _P_XW; F,M are mapped back to my body then to world."""
+        v_rel = self.vel[0] - self.wind
+        v_xw = self._P_XW @ (R.T @ v_rel)                 # air-relative velocity in XWing model frame
+        Va = float(np.linalg.norm(v_xw))
+        if Va < 1e-4:
+            return np.zeros(3), np.zeros(3)
+        u, vv, w = v_xw
+        alpha = float(np.arctan2(-vv, u))                 # AoA about model-z (y-up convention)
+        beta = float(np.arcsin(np.clip(w / Va, -1.0, 1.0)))   # sideslip about model-y
+        Wb = self._P_XW @ (R.T @ self.ang_v[0])           # body rates in XWing model frame
+        F_xw, M_xw = func_aero_model(alpha, beta, Va, Wb, self.RHO,
+                                     self.AERO_S, self.AERO_C, self.AERO_B,
+                                     (self.XG, self.YG, self.ZG),
+                                     float(self.fin_angles[0]), float(self.fin_angles[1]),
+                                     self.aero_rand)
+        return R @ (self._P_XW.T @ F_xw), R @ (self._P_XW.T @ M_xw)
 
     def _apply_wrench_and_wind(self, R, thrust, tau_body):
         did = int(self.DRONE_IDS[0])
-        # thrust along body +z, expressed in world
-        f_thrust = R[:, 2] * thrust
-        # fixed-wing aero (lift + drag) from relative airspeed, at COM -> pure force
-        f_aero = self._wing_aero(R)
+        f_thrust = R[:, 2] * thrust                      # thrust along body +z, in world
+        f_aero, m_aero = self._xwing_aero(R) if self.USE_XWING_AERO else self._wing_aero(R)
         p.applyExternalForce(did, -1, (f_thrust + f_aero).tolist(),
                              self.pos[0].tolist(), p.WORLD_FRAME, physicsClientId=self.CLIENT)
-        # body torque -> world (avoid pybullet LINK_FRAME torque quirks)
         tau_world = R @ tau_body
+        if self.yaw_bias != 0.0:                          # constant yaw-torque disturbance (about body-z)
+            tau_world = tau_world + R[:, 2] * self.yaw_bias
+        tau_world = tau_world + m_aero                    # aerodynamic moment (weathervane + damping)
         p.applyExternalTorque(did, -1, tau_world.tolist(), p.WORLD_FRAME, physicsClientId=self.CLIENT)
 
     # ------------------------------------------------------------------- step
     def step(self, action):
-        """Hold the policy CTBR set-point constant while the PID inner loop runs every
-        physics sub-step (inner loop @ PYB_FREQ); apply achieved wrench + wind + gravity."""
-        self.current_action = np.clip(np.asarray(action, dtype=float).reshape(4), -1.0, 1.0)
+        """Hold the policy CTBR set-point constant while the PID inner loop runs every physics
+        sub-step; apply achieved wrench + wind + gravity, then update estimators + integrals."""
+        self.current_action = np.clip(np.asarray(action, dtype=float).reshape(self.ACT_DIM), -1.0, 1.0)
         thrust_des, omega_des = self._decode_action(self.current_action)
-        v_prev = self.vel[0].copy()                       # for the acceleration estimate
+        v_prev = self.vel[0].copy()
 
+        fin_alpha = 1.0 - np.exp(-self.PYB_TIMESTEP / self.FIN_TAU)   # servo first-order lag
         for _ in range(self.PYB_STEPS_PER_CTRL):
+            if self.USE_ELEVONS:
+                fin_cmd = (self.FIN_MAX * self.current_action[:2]) * self.fin_gain + self.fin_offset
+                self.fin_angles += (fin_cmd - self.fin_angles) * fin_alpha
+                self.fin_angles = np.clip(self.fin_angles, -self.FIN_MAX, self.FIN_MAX)
             R, thrust, tau_body = self._control_wrench(thrust_des, omega_des)
             self._apply_wrench_and_wind(R, thrust, tau_body)
             p.stepSimulation(physicsClientId=self.CLIENT)
             self._updateAndStoreKinematicInformation()
 
-        self._update_wind_estimate(v_prev)               # disturbance observer
-        if self.USE_VEL_INTEGRAL and self.TASK == "velocity":
-            # leaky, clamped velocity-error integral (anti-windup). dI/dt = err - I/tau, so
-            # a constant error settles at I=err*tau and old setpoint transients decay away.
+        self._update_wind_estimate(v_prev)
+        # leaky, clamped integrals: dI/dt = err - I/tau -> constant error settles at I=err*tau and
+        # old setpoint transients decay away (anti-windup; works with changing targets).
+        if self.USE_VEL_INTEGRAL:
             err = self.target_vel - self.vel[0]
             self.vel_integral += (err - self.vel_integral / self.INTEGRAL_TAU) * self.CTRL_TIMESTEP
             self.vel_integral = np.clip(self.vel_integral, -self.MAX_SPEED, self.MAX_SPEED)
+        if self.USE_YAW_INTEGRAL:
+            R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
+            dpsi = self._yaw_error(R)
+            self.yaw_integral += (dpsi - self.yaw_integral / self.INTEGRAL_TAU) * self.CTRL_TIMESTEP
+            self.yaw_integral = float(np.clip(self.yaw_integral, -np.pi, np.pi))
+
         obs = self._computeObs()
         reward = self._computeReward()
         terminated = self._computeTerminated()
@@ -396,15 +527,12 @@ class RateVelAviary(BaseAviary):
         return obs, reward, terminated, truncated, info
 
     def _update_wind_estimate(self, v_prev):
-        """Disturbance observer: recover the total external force from the balance
-        m*a = F_thrust + F_gravity + F_ext, using NOMINAL mass + achieved thrust (i.e.
-        exactly what an onboard estimator has). F_ext now lumps wind + wing aero (lift +
-        drag) — the observer neither knows nor needs to separate them; total external force
-        is what the policy must reject to hold a target velocity. Target-independent ->
-        transfers to real-time changing targets. EMA-filtered."""
-        a = (self.vel[0] - v_prev) / self.CTRL_TIMESTEP          # finite-difference accel
+        """Disturbance observer: recover the total external force from m*a = F_thrust + F_gravity +
+        F_ext using NOMINAL mass + achieved thrust (what an onboard estimator has). F_ext lumps
+        wind + wing aero; target-independent -> transfers to changing targets. EMA-filtered."""
+        a = (self.vel[0] - v_prev) / self.CTRL_TIMESTEP
         R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
-        f_thrust = R[:, 2] * float(np.sum(self.motor_forces))    # achieved thrust, world
+        f_thrust = R[:, 2] * float(np.sum(self.motor_forces))
         f_ext = (self.NOMINAL_MASS * a - f_thrust
                  + np.array([0.0, 0.0, self.NOMINAL_MASS * self.G]))
         self.wind_est = ((1 - self.WIND_EST_ALPHA) * self.wind_est
@@ -414,87 +542,89 @@ class RateVelAviary(BaseAviary):
     def _computeObs(self):
         R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
         omega_body = R.T @ self.ang_v[0]
-        # motor RPM from actual (lagged) thrust, normalized to [0,1] (ESC telemetry)
-        rpm_norm = np.sqrt(np.clip(self.motor_forces / self.MOTOR_MAX, 0.0, 1.0))
-        # single forward pitot: axial airspeed along the thrust/prop axis (body-z). This is
-        # what one pitot tube physically reads (air-relative, no wind vector needed).
-        pitot = float(R[:, 2] @ (self.vel[0] - self.wind))
+        rpm_norm = np.sqrt(np.clip(self.motor_forces / self.MOTOR_MAX, 0.0, 1.0))  # ESC telemetry
+        pitot = float(R[:, 2] @ (self.vel[0] - self.wind))    # forward (axial) air-relative airspeed
         if self.PITOT_NOISE > 0.0:
             pitot += float(self.np_random.normal(0.0, self.PITOT_NOISE))
-        if self.TASK == "velocity":
-            first6 = np.concatenate([(self.target_vel - self.vel[0]) / self.MAX_SPEED,   # vel err
-                                     self.target_vel / self.MAX_SPEED])                   # target vel
-        else:  # position: relative position (clamped to range) + current velocity
-            rel = self.target_pos - self.pos[0]
-            n = np.linalg.norm(rel)
-            if n > self.POS_RANGE:                            # clamp to range (deployment carrot)
-                rel = rel * (self.POS_RANGE / n)
-            first6 = np.concatenate([rel / self.POS_RANGE,                                # rel pos
-                                     self.vel[0] / self.MAX_SPEED])                        # velocity
-        parts = [
-            first6,                               # 6
-            R.reshape(9),                         # 9
-            omega_body / self.MAX_RATE[0],        # 3
-            self.current_action,                  # 4
-            rpm_norm,                             # 4  <- solves motor delay
-        ]
+
+        vel_err = self.target_vel - self.vel[0]
+        tgt = self.target_vel
+        if self.VELYAW_HEADING_FRAME:
+            # rotate world vectors into the current-heading frame (yaw-invariant control map);
+            # R is still in obs so no attitude info is lost.
+            psi = self._current_yaw(R)
+            c, s = np.cos(-psi), np.sin(-psi)
+            Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+            vel_err = Rz @ vel_err
+            tgt = Rz @ tgt
+
+        parts = [vel_err / self.MAX_SPEED,        # 3
+                 tgt / self.MAX_SPEED,            # 3
+                 R.reshape(9),                    # 9
+                 omega_body / self.MAX_RATE[0],   # 3
+                 self.current_action,             # 4
+                 rpm_norm]                        # 4  <- solves motor lag
         if self.USE_WIND_EST:
-            parts.append(self.wind_est / self.NOMINAL_HOVER)   # 3  <- disturbance-observer estimate
+            parts.append(self.wind_est / self.NOMINAL_HOVER)   # 3  <- disturbance observer
         parts.append([pitot / self.MAX_SPEED])                 # 1  <- forward airspeed (drives wings)
+        if self.USE_ELEVONS:
+            parts.append(self.fin_angles / self.FIN_MAX)       # 2  <- actual servo deflections
         if self.USE_VEL_INTEGRAL:
-            parts.append(self.vel_integral / self.MAX_SPEED)   # 3  <- steady-state nulling
+            parts.append(self.vel_integral / self.MAX_SPEED)   # 3  <- steady velocity-error nulling
+        dpsi = self._yaw_error(R)
+        parts.append([np.sin(dpsi), np.cos(dpsi)])             # 2  <- heading error (wrap-safe)
+        if self.USE_YAW_INTEGRAL:
+            parts.append([self.yaw_integral / np.pi])          # 1  <- steady heading-offset nulling
         return np.concatenate(parts).astype(np.float32)
 
     # ---------------------------------------------------------------- reward
     def _computeReward(self):
         R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
         omega_body = R.T @ self.ang_v[0]
-        smooth = (- 5e-4 * float(omega_body @ omega_body)
+        smooth = (-5e-4 * float(omega_body @ omega_body)
                   - 5e-4 * float((self.current_action - self.prev_action)
                                  @ (self.current_action - self.prev_action)))
-        if self.TASK == "velocity":
-            # MULTI-SCALE velocity reward. Two Gaussians at different widths so precision does
-            # not trade off against range:
-            #   * a NARROW peak (2 m/s, absolute) gives a sharp gradient near the target -> low-
-            #     speed precision (a single wide peak scaled to MAX_SPEED left <4 m/s errors
-            #     almost flat, so the policy never tightened up);
-            #   * a WIDE peak (scales with MAX_SPEED) guides acceleration across the whole
-            #     envelope so high-speed targets still have a gradient far from the target.
-            # Linear term (scaled) is the far-field pull.
-            s = self.MAX_SPEED / 20.0
-            d = np.linalg.norm(self.vel[0] - self.target_vel)
-            reward = (1.0 - np.tanh(d / 2.0)                       # SHARP precision peak: steepest
-                      #                                              gradient AT d=0 (no flat-top
-                      #                                              deadband, unlike a Gaussian)
-                      + np.exp(-0.5 * (d / (10.0 * s)) ** 2)       # wide coverage (scales to envelope)
-                      #                                              -> guides into the sharp region
-                      - (0.02 / s) * d + smooth)
-        else:  # position: reach target AND stop there; soft speed cap
-            dp = np.linalg.norm(self.target_pos - self.pos[0])
-            speed = np.linalg.norm(self.vel[0])
-            # NOTE: reward is kept NON-NEGATIVE while alive so the policy never prefers
-            # crashing (which terminates) over flying to a far target. A linear positive
-            # baseline gives a dense gradient across the whole range; a sharp Gaussian
-            # adds terminal precision.
-            reward = (np.clip(1.0 - dp / self.POS_RANGE, 0.0, 1.0)  # positive guidance + survival
-                      + 2.0 * np.exp(-0.5 * (dp / 1.0))            # exponential (sigma 1.0): non-zero
-                      #                                              slope at dp=0 (no flat deadband)
-                      #                                              AND reachable band (~2 m) so the
-                      #                                              policy actually collects it
-                      + 0.5 * np.exp(-0.5 * (dp / 0.25) ** 2)      # tiny bonus for pin-point (<0.25 m)
-                      # NOTE: no explicit brake / stopping-distance term — testing whether the
-                      # pure position reward alone learns not to overshoot (overshoot is
-                      # reward-suboptimal), given enough training.
-                      - 0.01 * max(0.0, speed - self.SPEED_CAP) ** 2  # soft speed cap (safety only)
-                      + smooth)
+        # TWO objectives: velocity AND heading. Each gets a sharp 1-tanh peak (steep gradient at 0,
+        # no flat-top deadband) + a wide-coverage term (far-field gradient across the envelope),
+        # combined ADDITIVELY (each always has a gradient) with a small MULTIPLICATIVE joint bonus
+        # (high only when BOTH are nailed). Non-negative while alive; only terminal is numeric
+        # divergence, so there is no suicide route to game the far-field pull.
+        s = self.MAX_SPEED / 20.0
+        d = np.linalg.norm(self.vel[0] - self.target_vel)
+        a = abs(self._yaw_error(R))
+        w = self.YAW_REWARD_WIDTH
+        W = self.COV_WIDTH if self.COV_WIDTH > 0.0 else 10.0 * s
+        cov = np.exp(-0.5 * (d / W) ** 2)                      # wide velocity coverage
+        r_vel = (1.0 - np.tanh(d / 2.0)) + cov
+        if self.VEL_PRECISION > 0.0:
+            # narrow precision peak: the d/2 term is ~flat below 2 m/s (92% collected at d=1),
+            # so sub-1 m/s tracking gets almost no gradient without this. Width 0.5 m/s puts
+            # the steepest gradient exactly in the <1 m/s regime the task targets.
+            r_vel += self.VEL_PRECISION * (1.0 - np.tanh(d / 0.5))
+        r_yaw = (1.0 - np.tanh(a / w)) + np.exp(-0.5 * (a / 1.0) ** 2)
+        joint = (1.0 - np.tanh(d / 2.0)) * (1.0 - np.tanh(a / w))
+        # yaw GATE: without it, "hold yaw while diving" earns ~1.4/step and every partial
+        # recovery attempt scores worse (yaw disturbed before velocity improves) -> stable
+        # local optimum. Gating yaw by velocity coverage removes the payout in a dive AND
+        # gives a smooth gradient along the recovery path (every m/s arrested raises the gate).
+        gf = self.YAW_GATE_FLOOR
+        gate = (gf + (1.0 - gf) * cov) if self.YAW_GATE else 1.0
+        if self.YAW_ATT_GATE:
+            # attitude gate: in wing-borne flight the nose must follow the velocity vector (the
+            # only free rotation is roll about the flight path), so a random desired_yaw is
+            # structurally unsatisfiable at speed — and an always-on yaw reward punishes the
+            # ALIGNED (small-alpha) attitude the vehicle needs there, locking it into draggy
+            # half-transitioned flight (measured: mean |alpha| 53-82 deg at 20-45 m/s).
+            # R[2,2] = 1 in hover (yaw fully enforced) -> 0 at 90-deg tilt (yaw released).
+            gate = gate * float(np.clip(R[2, 2], 0.0, 1.0))
+        reward = r_vel + self.YAW_WEIGHT * gate * r_yaw + 0.5 * joint - (0.02 / s) * d + smooth
         if self._crashed():
             reward -= 10.0
         return float(reward)
 
     # --------------------------------------------------------- term / trunc
     def _crashed(self):
-        # NB: NO attitude limit -- a tailsitter must pitch ~90 deg to reach cruise, so the
-        # old 85 deg roll/pitch crash is removed. Only a numerically diverged state counts.
+        # NO attitude limit -- a tailsitter legitimately tilts hard; only a diverged state counts.
         if not np.all(np.isfinite(self.pos[0])) or np.max(np.abs(self.pos[0])) > 1e4:
             return True
         return False
@@ -506,8 +636,9 @@ class RateVelAviary(BaseAviary):
         return bool(self.step_counter / self.PYB_FREQ >= self.EPISODE_LEN_SEC)
 
     def _computeInfo(self):
+        R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
         return {"target_vel": self.target_vel.copy(),
-                "target_pos": self.target_pos.copy(),
+                "desired_yaw": float(self.desired_yaw),
                 "pos": self.pos[0].copy(),
                 "vel": self.vel[0].copy(),
                 "mass": self.M,
@@ -515,4 +646,4 @@ class RateVelAviary(BaseAviary):
                 "motor_tau": self.motor_tau,
                 "wind_est": self.wind_est.copy(),
                 "vel_error": float(np.linalg.norm(self.vel[0] - self.target_vel)),
-                "pos_error": float(np.linalg.norm(self.pos[0] - self.target_pos))}
+                "yaw_error": self._yaw_error(R)}
