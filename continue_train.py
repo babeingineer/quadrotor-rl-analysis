@@ -72,11 +72,14 @@ def main():
                        cov_width=cfg.get("cov_width", 0.0),
                        aero_dr=cfg.get("aero_dr", True),
                        integral_tau=cfg.get("integral_tau", 3.0),
+                       priv_obs=cfg.get("priv_critic", False),
+                       att_cmd=cfg.get("att_cmd", False), katt=cfg.get("katt", 1.5),
                        kp_rate=tuple(float(x) for x in cfg.get("kp_rate", "6,6,4").split(",")),
                        ki_rate=tuple(float(x) for x in cfg.get("ki_rate", "0.5,0.5,0.3").split(",")))
-    # same tough-init mix as the source run; wind stays at the full post-curriculum value
+    # same tough/trim-init mix as the source run; wind stays at the full post-curriculum value
     train_kwargs = dict(base_kwargs, randomize_init=True,
-                        tough_init_frac=cfg.get("tough_init", 0.0))
+                        tough_init_frac=cfg.get("tough_init", 0.0),
+                        trim_init_frac=cfg.get("trim_init", 0.0))
     eval_kwargs = dict(base_kwargs, randomize_init=False)
     os.makedirs(args.out, exist_ok=True)
     json.dump(cfg, open(os.path.join(args.out, "config.json"), "w"))

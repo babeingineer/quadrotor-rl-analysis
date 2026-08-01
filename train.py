@@ -23,8 +23,7 @@ from progress_callback import ProgressPlotCallback
 
 class VecNormSaveCallback(BaseCallback):
     """Save VecNormalize stats on the checkpoint cadence so a killed run can resume
-    consistently (model ckpt + matching obs-normalization stats). Added after xw22
-    OOM-died at 1.9M steps with NO vecnormalize.pkl on disk (only saved at the end)."""
+    consistently (model ckpt + matching obs-normalization stats)."""
     def __init__(self, env, path, every):
         super().__init__(); self.env = env; self.path = path; self.every = every; self._last = 0
 
@@ -90,6 +89,17 @@ def main():
     ap.add_argument("--tough-init", type=float, default=0.0,
                     help="fraction of TRAINING episodes started in failure states (dive/botched "
                          "transition) so recovery gets direct gradient")
+    ap.add_argument("--trim-init", type=float, default=0.0,
+                    help="fraction of TRAINING episodes started AT the target velocity in "
+                         "near-trim attitude (trim_table.npz)")
+    ap.add_argument("--att-cmd", action="store_true",
+                    help="attitude-setpoint action interface (thrust + desired body-z + yaw "
+                         "rate -> inner attitude P -> rate PID)")
+    ap.add_argument("--katt", type=float, default=1.5, help="attitude-P gain for --att-cmd")
+    ap.add_argument("--priv-critic", action="store_true",
+                    help="asymmetric actor-critic: critic sees the hidden episode draw "
+                         "(27 dims appended to obs); actor sees only the deployable obs "
+                         "(priv_policy.py slices)")
     ap.add_argument("--wind-curriculum", action="store_true",
                     help="train wind_max: 8 m/s until 3M steps, linear ramp to 20 by 6M")
     ap.add_argument("--yaw-gate", action="store_true",
@@ -98,9 +108,9 @@ def main():
                     help="fraction of the yaw reward that always pays (gate floor)")
     ap.add_argument("--ent-coef", type=float, default=0.0)
     ap.add_argument("--gamma", type=float, default=0.99,
-                    help="discount; 0.99@50Hz = ~2s horizon, too short to value a 3s transition")
+                    help="discount factor (0.99 at 50 Hz control = ~2 s value horizon)")
     ap.add_argument("--episode-len", type=float, default=8.0,
-                    help="TRAINING episode length (s); longer amortizes the transition cost")
+                    help="TRAINING episode length (s)")
     ap.add_argument("--cov-width", type=float, default=0.0,
                     help="coverage Gaussian width in m/s (0 = legacy 10*MAX_SPEED/20)")
     ap.add_argument("--vel-precision", type=float, default=0.0,
@@ -108,8 +118,8 @@ def main():
     ap.add_argument("--yaw-att-gate", action="store_true",
                     help="release the yaw reward in wing-borne flight (clip(R22,0,1) gate)")
     ap.add_argument("--integral-tau", type=float, default=3.0,
-                    help="velocity/yaw integral leak (s); large (1e6) = TRUE integrator: "
-                         "classical baseline proved leak tau=3 bounds steady error ~3x")
+                    help="velocity/yaw integral leak time constant (s); very large (1e6) "
+                         "approximates a true integrator")
     ap.add_argument("--no-aero-dr", action="store_true",
                     help="ABLATION: fixed nominal aerodynamics (no 17-coeff/Xg randomization)")
     ap.add_argument("--kp-rate", type=str, default="25,25,15",
@@ -120,7 +130,7 @@ def main():
                     help="policy/value hidden layer sizes, comma-separated (e.g. 256,256,256)")
     ap.add_argument("--no-subproc", action="store_true")
     ap.add_argument("--device", type=str, default="cpu",
-                    help="torch device; CPU is faster for this small MLP + CPU sim (benchmarked)")
+                    help="torch device; CPU is typically faster for this small MLP + CPU sim")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
 
@@ -137,6 +147,8 @@ def main():
                "xwing_aero": args.xwing_aero, "tough_init": args.tough_init,
                "wind_curriculum": args.wind_curriculum, "yaw_gate": args.yaw_gate,
                "yaw_gate_floor": args.yaw_gate_floor, "vel_precision": args.vel_precision,
+               "trim_init": args.trim_init, "priv_critic": args.priv_critic,
+               "att_cmd": args.att_cmd, "katt": args.katt,
                "yaw_att_gate": args.yaw_att_gate, "cov_width": args.cov_width,
                "kp_rate": args.kp_rate, "ki_rate": args.ki_rate,
                "aero_dr": not args.no_aero_dr, "integral_tau": args.integral_tau,
@@ -155,21 +167,29 @@ def main():
                        cov_width=args.cov_width,
                        kp_rate=tuple(float(x) for x in args.kp_rate.split(",")),
                        ki_rate=tuple(float(x) for x in args.ki_rate.split(",")),
-                       aero_dr=not args.no_aero_dr, integral_tau=args.integral_tau)
-    # tough init only shapes TRAINING; eval keeps the level start -> comparable metric
-    train_kwargs = dict(base_kwargs, randomize_init=True, tough_init_frac=args.tough_init)
+                       aero_dr=not args.no_aero_dr, integral_tau=args.integral_tau,
+                       priv_obs=args.priv_critic, att_cmd=args.att_cmd, katt=args.katt)
+    # tough/trim init only shape TRAINING; eval keeps the level start -> comparable metric
+    train_kwargs = dict(base_kwargs, randomize_init=True, tough_init_frac=args.tough_init,
+                        trim_init_frac=args.trim_init)
     eval_kwargs = dict(base_kwargs, randomize_init=False)
     train_env = norm_env(args.n_envs, args.seed, not args.no_subproc, True, True, train_kwargs,
                          norm_gamma=args.gamma)
     eval_env = norm_env(1, args.seed + 999, not args.no_subproc, False, False, eval_kwargs,
                         norm_gamma=args.gamma)
 
+    pk = dict(net_arch=[int(x) for x in args.net.split(",")])
+    policy = "MlpPolicy"
+    if args.priv_critic:
+        from priv_policy import PrivACPolicy
+        policy = PrivACPolicy
+        pk["actor_dim"] = int(train_env.observation_space.shape[0]) - 27
     model = PPO(
-        "MlpPolicy", train_env,
+        policy, train_env,
         n_steps=2048, batch_size=4096, n_epochs=10,
         gamma=args.gamma, gae_lambda=0.95, clip_range=0.2,
         ent_coef=args.ent_coef, learning_rate=3e-4, max_grad_norm=0.5,
-        policy_kwargs=dict(net_arch=[int(x) for x in args.net.split(",")]),
+        policy_kwargs=pk,
         tensorboard_log=os.path.join(args.out_dir, "tb"),
         seed=args.seed, verbose=1, device=args.device,
     )

@@ -2,6 +2,8 @@
 
 **Quick read: [JOURNEY.md](JOURNEY.md)** — concise summary of the 81.7 → 5.26 m/s arc:
 what failed, what succeeded, and the recurring failure mode.
+**Master plan: [ULTIMATE_PLAN.md](ULTIMATE_PLAN.md)** — 2026-07-31 full-record diagnosis
+(4 root causes, adversarially verified) + the staged redesign to <1 m/s.
 
 One MD file per training run, in chronological order. Each file records: what changed vs the
 previous run, why, the exact code changes, the full configuration, the results (training curve,
@@ -26,12 +28,20 @@ physical metrics, behavior traces), and the analysis/verdict.
 | 14 | [14_xw17b_continuation.md](14_xw17b_continuation.md) | `results_velyaw_xw17b` | **LOOP iter 8**: continue xw17 +8M | **6.24** — REGRESSED (post-saturation drift); generalist track closed at xw17's 5.26 |
 | 15 | [15_xw18_lowband_specialist.md](15_xw18_lowband_specialist.md) | `results_velyaw_xw18` | **LOOP iter 9 — FEASIBILITY PROBE**: 0–10 m/s specialist | **2.31** ≈ generalist's 2.27 — floor is ENVIRONMENTAL: DR costs ~1.3, wind adds ~0.7; <1 unreachable under current spec |
 | 17 | [17_xw19_highband_specialist.md](17_xw19_highband_specialist.md) | `results_velyaw_xw19(b)` | **LOOP iter 11**: HIGH-band specialist + convergence | **10.09** — worse than generalist's 8.58; traces: attitude oscillation + vz drift at high Q → inner-loop branch |
-| 18 | [18_lstm_full_envelope.md](18_lstm_full_envelope.md) | `results_velyaw_lstm` | RecurrentPPO full-envelope — implicit system-ID vs ±20% aero DR (user request) | *(training)* |
-| 23 | [23_xw23_midband_corrected.md](23_xw23_midband_corrected.md) | `results_velyaw_xw23(b)` | **LOOP**: mid band, corrected recipe REVISED to γ 0.997 after xw22b's γ-0.999 failure | *(training — target mean ≤2 / median ≤0.5)* |
+| 18 | [18_lstm_full_envelope.md](18_lstm_full_envelope.md) | `results_velyaw_lstm(3)` | RecurrentPPO full-envelope — implicit system-ID vs ±20% aero DR (user request) | **FAILURE: 17.20 / yaw 82°** @6M — LSTM decisively worse than MLP; memory/system-ID path closed |
+| 23 | [23_xw23_midband_corrected.md](23_xw23_midband_corrected.md) | `results_velyaw_xw23(b)` | **LOOP**: mid band, corrected recipe @ γ 0.997 | **FAILURE: 10.51 / yaw 77°** @20s — never settles; true-int obs railing + 20 s dilution suspected → isolation ladder (25/26) |
 | 21 | [21_classical_baseline.md](21_classical_baseline.md) | `classical_baseline.py` | **PROBE**: manual-control baseline (user's premise) | **low 0.64 / mid median 0.20 / high median 3.90 @20-30s FULL SPEC**; high-band residual = saturated-integrator CONSTANT offset (authority/windup dilemma, structural to the cascade); trim scan (CORRECTED, addendum 5): **100% of high-band draws have an exact trim** — coarse-scan "infeasible 10%" was an attitude-resolution artifact; no physics obstruction to <1 anywhere in the envelope |
 | 22 | [22_xw22_true_integrator.md](22_xw22_true_integrator.md) | `results_velyaw_xw22(b)` | **LOOP**: true integrator + 20 s + γ 0.999 + stiff gains, low band (4 vars at once) | **FAILURE: 2.66 / median 2.08 / 3%<1, yaw 53°** @20s eval — regressed vs xw18b (0.82 med); γ≈1 yaw collapse; lesson: one variable per trial → xw25 isolates |
-| 24 | [24_xw24_highband_corrected.md](24_xw24_highband_corrected.md) | `results_velyaw_xw24(b)` | **LOOP**: HIGH band, corrected recipe @ γ 0.997 — first fair RL test where trim-feasibility is proven 100% | *(queued after xw23)* |
-| 25 | [25_xw25_lowband_isolation.md](25_xw25_lowband_isolation.md) | `results_velyaw_xw25(b)` | **ISOLATION**: xw18b + ONLY true integrator + 20 s (γ 0.99, default gains) | *(queued after xw24)* |
+| 24 | [24_xw24_highband_corrected.md](24_xw24_highband_corrected.md) | `results_velyaw_xw24(b)` | **LOOP**: HIGH band, corrected recipe @ γ 0.997 | **ABORTED pre-verdict** — recipe went 0-for-2 (trials 22/23); redesign waits for the isolation verdicts |
+| 25 | [25_xw25_lowband_isolation.md](25_xw25_lowband_isolation.md) | `results_velyaw_xw25(b)` | **ISOLATION**: xw18b + ONLY true integrator + 20 s (γ 0.99, default gains) | **vel 0.93 med ≈ xw18b (pair EXONERATED on velocity) but yaw 90° at γ0.99** → γ never the yaw driver; E4 dead; standing recipe = leaky τ3 / 8 s / γ0.99 |
+| 27 | [27_xw27_trim_init.md](27_xw27_trim_init.md) | `results_velyaw_xw27(b)` | **E1**: mid band + trim-init 0.2 (goal-state exposure; ONE change vs xw26) — inflight-hold discriminator proved the hold skill is missing | **BIGGEST SINGLE-CHANGE MID GAIN: 4.09 / median 3.44 / yaw 14.5°** (was 6.33/4.44/52°); hold 3.27 from trim → hold quality is the whole residual |
+| 33 | [33_xw27_budget_ladder.md](33_xw27_budget_ladder.md) | `results_velyaw_xw27c/d` | **K4a auto-ladder** on xw27b: +8M stages while median improves >7% | 20M: 2.61 → 28M: 1.72 → 36M: **median 1.29** (−25%, still climbing) → 44M running |
+| 32 | [32_xw32_att_cmd.md](32_xw32_att_cmd.md) | `results_velyaw_xw32(b)` | **ATT-CMD**: attitude-setpoint interface (structural trim stabilization) + trim-init | 12M: 2.35 → 20M: 1.52 → 28M: **ROBUST median 1.09 [0.99–1.20], 45%<1** → 36M running |
+| 31 | [31_xw31_precision_reshape.md](31_xw31_precision_reshape.md) | `results_velyaw_xw31(b)` | **ARM B**: precision weight 0.7→1.5 (incentive hypothesis; vs xw27) | **FLAT: 3.67 med** ≈ xw27 — incentive refuted |
+| 30 | [30_xw30_priv_critic.md](30_xw30_priv_critic.md) | `results_velyaw_xw30(b)` | **ARM A / E6**: privileged critic (advantage-noise hypothesis; vs xw27) | **FAILURE: 5.13 med** (regression) — advantage noise refuted |
+| 29 | [29_xw29_highband_trim_init.md](29_xw29_highband_trim_init.md) | `results_velyaw_xw29(b)` | HIGH anchor + trim-init 0.2 | **BEST HIGH EVER: 7.38 / median 5.88** @8s (prior 8.62 med @20s); hold 6.29 from trim → same hold deficit as mid |
+| 28 | [28_xw28_trim_init_04.md](28_xw28_trim_init_04.md) | `results_velyaw_xw28(b)` | **E1 dose**: trim-init 0.4 | **FLAT: 4.64 / median 3.38** ≈ xw27 → exposure saturated; learnability impeded → arms 30/31 |
+| 26 | [26_xw26_midband_proven_recipe.md](26_xw26_midband_proven_recipe.md) | `results_velyaw_xw26(b)` | **ANCHOR**: mid band, xw18b proven recipe VERBATIM (band is the only change) | **FAILURE: 6.33 / median 4.44 / 0%<1** @8s, UNIFORM across wind bins (not a tail); yaw 52° at γ0.99 → yaw collapse RE-ATTRIBUTED to the attitude gate at wing-borne bands, NOT γ |
 | 20 | [20_xw21_no_aero_dr.md](20_xw21_no_aero_dr.md) | `results_velyaw_xw21(b)` | **ABLATION (user)**: aero DR OFF, high band | **11.40** — WORSE than with DR (8.94): identification REFUTED as the bottleneck; DR even regularizes |
 | 19 | [19_xw20_stiff_inner_loop.md](19_xw20_stiff_inner_loop.md) | `results_velyaw_xw20(b)` | **LOOP iter 12**: stiff inner loop (kp 40/ki 10), high band | **8.94** — ripple real (~1 m/s) but not dominant; identification term now prime suspect → LSTM decides |
 | 16 | [16_xw18b_floor.md](16_xw18b_floor.md) | `results_velyaw_xw18b` | **LOOP iter 10**: converge the specialist | **MILESTONE**: hover 0.78 ✓; low-band 1.89 mean / **0.82 median**, 59% of eps < 1 under FULL spec — floor = wind tail, not training |
@@ -50,7 +60,7 @@ physical metrics, behavior traces), and the analysis/verdict.
   are written when the run is launched.
 
 ## Prior projects (documented elsewhere)
-- Heavy-quad velocity + position tasks: [../TRAINING_HISTORY.md](../TRAINING_HISTORY.md)
+- Heavy-quad velocity + position tasks: [../docs/TRAINING_HISTORY.md](../docs/TRAINING_HISTORY.md)
 - Tailsitter VTOL 0–80 m/s velocity tracking (integrator/tanh/memory study):
-  [../TAILSITTER.md](../TAILSITTER.md)
-- General lessons: [../LESSONS.md](../LESSONS.md)
+  [../docs/TAILSITTER.md](../docs/TAILSITTER.md)
+- General lessons: [../docs/LESSONS.md](../docs/LESSONS.md)

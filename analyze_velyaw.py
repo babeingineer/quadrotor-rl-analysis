@@ -75,9 +75,8 @@ if __name__ == "__main__":
     ap.add_argument("--dir", default="results_velyaw_xw7")
     ap.add_argument("--episodes", type=int, default=120)
     ap.add_argument("--ep-len", type=float, default=None,
-                    help="eval episode length (s); default = the TRAINED episode_len from "
-                         "config.json (a 20 s-trained policy measured at 10 s reproduces the "
-                         "clipped-settle artifact the 20 s recipe exists to fix)")
+                    help="eval episode length (s); default = the trained episode_len from "
+                         "config.json, so slow-settling policies are not clipped early")
     args = ap.parse_args()
     cfg = json.load(open(os.path.join(args.dir, "config.json")))
     ep_len = args.ep_len if args.ep_len is not None else float(cfg.get("episode_len", 10.0))

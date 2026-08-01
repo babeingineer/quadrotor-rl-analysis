@@ -49,6 +49,8 @@ def load(D, ep_len=10.0, **overrides):
               cov_width=cfg.get("cov_width", 0.0),
               aero_dr=cfg.get("aero_dr", True),
               integral_tau=cfg.get("integral_tau", 3.0),
+              priv_obs=cfg.get("priv_critic", False),
+              att_cmd=cfg.get("att_cmd", False), katt=cfg.get("katt", 1.5),
               kp_rate=tuple(float(x) for x in cfg.get("kp_rate", "6,6,4").split(",")),
               ki_rate=tuple(float(x) for x in cfg.get("ki_rate", "0.5,0.5,0.3").split(",")),
               randomize_init=False)
@@ -90,28 +92,46 @@ def evaluate(D, n=120, ep_len=10.0, steady_window=3.0, **overrides):
                 crashed = k < N - 1
                 break
         band = ("hover(0-1)" if tgt_speed < 1 else "low(1-10)" if tgt_speed < 10 else
-                "mid(10-18)" if tgt_speed < 18 else "high(18-25)")
+                "mid(10-18)" if tgt_speed < 18 else "high(18-25)" if tgt_speed < 25 else
+                "vhigh(25-35)" if tgt_speed < 35 else "top(35-45)")
         rows.append((band, np.mean(verrs) if verrs else np.nan,
-                     np.mean(yerrs) if yerrs else np.nan, crashed, tgt_speed))
+                     np.mean(yerrs) if yerrs else np.nan, crashed, tgt_speed,
+                     float(np.linalg.norm(base.wind))))
     venv.close()
     return rows
 
 
 def report(rows):
-    bands = ["hover(0-1)", "low(1-10)", "mid(10-18)", "high(18-25)"]
+    """Distribution-aware report: the band MEAN under full DR/wind is dominated by the
+    strong-draw tail, so median / %<1 / p90 are reported alongside it."""
+    bands = ["hover(0-1)", "low(1-10)", "mid(10-18)", "high(18-25)",
+             "vhigh(25-35)", "top(35-45)"]
     ok = [r for r in rows if not r[3]]
-    print(f"\n{'band':<12}{'n':>4}{'vel err (m/s)':>15}{'yaw err (deg)':>15}")
-    print("-" * 46)
+    print(f"\n{'band':<12}{'n':>4}{'mean':>8}{'median':>8}{'%<1':>6}{'p90':>8}{'yaw':>8}")
+    print("-" * 56)
     for b in bands:
         rs = [r for r in ok if r[0] == b]
         if not rs:
             continue
-        print(f"{b:<12}{len(rs):>4}{np.mean([r[1] for r in rs]):>15.2f}"
-              f"{np.mean([r[2] for r in rs]):>15.1f}")
-    print("-" * 46)
+        e = np.array([r[1] for r in rs])
+        print(f"{b:<12}{len(rs):>4}{e.mean():>8.2f}{np.median(e):>8.2f}"
+              f"{np.mean(e < 1) * 100:>5.0f}%{np.percentile(e, 90):>8.2f}"
+              f"{np.mean([r[2] for r in rs]):>7.1f}°")
+    print("-" * 56)
+    e = np.array([r[1] for r in ok])
     crash = sum(r[3] for r in rows) / len(rows) * 100
-    print(f"{'ALL':<12}{len(ok):>4}{np.mean([r[1] for r in ok]):>15.2f}"
-          f"{np.mean([r[2] for r in ok]):>15.1f}   crash {crash:.1f}%")
+    print(f"{'ALL':<12}{len(ok):>4}{e.mean():>8.2f}{np.median(e):>8.2f}"
+          f"{np.mean(e < 1) * 100:>5.0f}%{np.percentile(e, 90):>8.2f}"
+          f"{np.mean([r[2] for r in ok]):>7.1f}°   crash {crash:.1f}%")
+    if len(ok) and len(ok[0]) > 5:                       # wind-bin breakdown (draw magnitude)
+        print("wind bins: ", end="")
+        for lo, hi in ((0, 5), (5, 10), (10, 15)):
+            rs = [r for r in ok if lo <= r[5] < hi]
+            if rs:
+                eb = np.array([r[1] for r in rs])
+                print(f"[{lo}-{hi}) n={len(rs)} med {np.median(eb):.2f} <1: "
+                      f"{np.mean(eb < 1) * 100:.0f}%  ", end="")
+        print()
 
 
 if __name__ == "__main__":

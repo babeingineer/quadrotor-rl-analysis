@@ -1,7 +1,7 @@
 """Shared EvalCallback that (a) syncs VecNormalize obs stats before each eval,
 (b) saves a velocity-tracking image of the current policy, and (c) refreshes the
-training-curve graph. Used by both train.py (PPO) and train_sac.py (SAC) so the two
-runs produce directly comparable artifacts."""
+training-curve graph. Used by the training scripts so runs produce directly
+comparable artifacts."""
 import os
 import numpy as np
 import matplotlib

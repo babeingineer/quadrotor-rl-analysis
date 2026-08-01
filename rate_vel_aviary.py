@@ -42,7 +42,7 @@ class RateVelAviary(BaseAviary):
                  # --- task ---
                  episode_len_sec: float = 8.0,
                  max_speed: float = 25.0,
-                 speed_min: float = 0.0,          # min target speed: band-limited specialists
+                 speed_min: float = 0.0,          # min target speed (band-limited training)
                  # --- airframe / domain randomization (small tailsitter VTOL) ---
                  mass_range=(2.0, 5.0),
                  motor_max_thrust: float = 40.0,   # N per motor (4 -> 160 N total)
@@ -51,8 +51,13 @@ class RateVelAviary(BaseAviary):
                  inertia_nominal=(0.06, 0.03, 0.06),  # kg m^2 at NOMINAL_MASS (scales w/ mass)
                  randomize_init: bool = False,     # gentle +-40 deg tilt + random vel/heading start
                  tough_init_frac: float = 0.0,     # fraction of episodes started in FAILURE states
-                 #                                   (developed dive / botched transition) so the
-                 #                                   policy gets direct gradient on recovery
+                 trim_init_frac: float = 0.0,      # fraction started AT the target in near-trim attitude
+                 priv_obs: bool = False,           # append the hidden episode draw to obs
+                 #                                   (CRITIC-ONLY consumption via priv_policy.py)
+                 att_cmd: bool = False,            # action = attitude setpoint (thrust + desired
+                 #                                   body-z + yaw rate) -> inner attitude P ->
+                 #                                   rate PID
+                 katt: float = 1.5,                # attitude-P gain for att_cmd mode
                  # --- observation features ---
                  use_wind_est: bool = True,        # disturbance-observer external-force estimate
                  use_vel_integral: bool = True,    # leaky+clamped velocity-error integral
@@ -62,16 +67,14 @@ class RateVelAviary(BaseAviary):
                  yaw_reward_width: float = 0.35,   # rad; sharp-peak width of the heading reward
                  yaw_weight: float = 1.0,          # weight of the heading objective in the reward
                  yaw_bias_max: float = 0.0,        # N*m; per-episode constant yaw-torque disturbance
-                 yaw_gate: bool = False,           # gate the yaw reward by velocity success, so
-                 #                                   "track yaw while diving" stops being a local optimum
+                 yaw_gate: bool = False,           # gate the yaw reward by velocity success
                  yaw_gate_floor: float = 0.2,      # fraction of the yaw reward that always pays
                  #                                   (higher -> more yaw pressure at high vel error)
                  vel_precision: float = 0.0,       # weight of an extra NARROW velocity peak
                  #                                   (1 - tanh(d/0.5)): gradient below ~1 m/s, where
                  #                                   the d/2 peak is already ~flat
-                 cov_width: float = 0.0,           # wide-coverage Gaussian width (m/s); 0 = legacy
-                 #                                   10*(MAX_SPEED/20). 12.5 pays 75% at 9.5 m/s err
-                 #                                   -> subsidizes not transitioning; ~5 fixes that
+                 cov_width: float = 0.0,           # wide-coverage Gaussian width (m/s);
+                 #                                   0 = default 10*(MAX_SPEED/20)
                  yaw_att_gate: bool = False,       # scale yaw reward by clip(R22,0,1): yaw enforced in
                  #                                   hover (controllable) and released in wing-borne
                  #                                   cruise, where the nose must follow the velocity
@@ -115,6 +118,13 @@ class RateVelAviary(BaseAviary):
         self.J_NOMINAL = np.array(inertia_nominal, dtype=float)
         self.RANDOMIZE_INIT = bool(randomize_init)
         self.TOUGH_INIT_FRAC = float(tough_init_frac)
+        self.TRIM_INIT_FRAC = float(trim_init_frac)
+        self._trim_table = None                    # lazy-loaded trim_table.npz
+        self.PRIV_OBS = bool(priv_obs)
+        self.ATT_CMD = bool(att_cmd)
+        self.KATT = float(katt)
+        self._bz_des = None
+        self._yaw_rate_des = 0.0
         self.USE_WIND_EST = bool(use_wind_est)
         self.USE_VEL_INTEGRAL = bool(use_vel_integral)
         self.USE_YAW_INTEGRAL = bool(use_yaw_integral)
@@ -234,12 +244,16 @@ class RateVelAviary(BaseAviary):
         # same "sense the actuator" rationale as motor RPM)
         dim = 27 + (3 if self.USE_WIND_EST else 0) + (3 if self.USE_VEL_INTEGRAL else 0) \
               + 2 + (1 if self.USE_YAW_INTEGRAL else 0) + (4 if self.USE_ELEVONS else 0)
+        # privileged tail (CRITIC-ONLY): hidden episode draw appended so an asymmetric
+        # critic can predict returns; the actor slices it off (priv_policy.py)
+        if self.PRIV_OBS:
+            dim += 27
         return spaces.Box(low=-np.inf, high=np.inf, shape=(dim,), dtype=np.float32)
 
     # ---------------------------------------------------------------- heading
     def _current_yaw(self, R):
         """Heading = azimuth of body-x (nose) in the world horizontal plane. Well-conditioned
-        except near body-x vertical (extreme tilt), which the <=25 m/s envelope never forces."""
+        except near body-x vertical (extreme tilt)."""
         nose = R[:, 0]
         return float(np.arctan2(nose[1], nose[0]))
 
@@ -273,10 +287,9 @@ class RateVelAviary(BaseAviary):
         return np.array(q)
 
     def _sample_tough_init(self):
-        """FAILURE-state starts, so recovery gets direct on-policy gradient:
-        50% developed dive (30-50 m/s steeply down, nose near-aligned with the flow = the
-        weathervaned state the policy actually gets trapped in), 50% botched transition
-        (60-120 deg tilt at 15-30 m/s, tumbling)."""
+        """Failure-state starts: 50% developed dive (30-50 m/s steeply down, nose
+        near-aligned with the flow), 50% botched transition (60-120 deg tilt at
+        15-30 m/s, tumbling)."""
         if self.np_random.uniform() < 0.5:
             az = self.np_random.uniform(-np.pi, np.pi)
             elev = np.radians(self.np_random.uniform(40.0, 90.0))
@@ -371,9 +384,45 @@ class RateVelAviary(BaseAviary):
 
         self._resample_target()
 
+        # trim init: start this episode AT the target velocity in near-trim attitude
+        # (table trim for the episode's v_rel, plus angular scatter)
+        if self.TRIM_INIT_FRAC > 0.0 and self.np_random.uniform() < self.TRIM_INIT_FRAC:
+            self._apply_trim_init()
+
         # position irrelevant -> fly freely (incl. downward targets / drift in wind)
         p.setCollisionFilterPair(int(self.PLANE_ID), int(self.DRONE_IDS[0]),
                                  -1, -1, enableCollision=0, physicsClientId=self.CLIENT)
+
+    def _apply_trim_init(self):
+        from scipy.spatial.transform import Rotation as _Rot
+        if self._trim_table is None:
+            import os
+            self._trim_table = dict(np.load(os.path.join(os.path.dirname(
+                os.path.abspath(__file__)), "trim_table.npz")))
+        t = self._trim_table
+        v_rel = self.target_vel - self.wind
+        s = float(np.linalg.norm(v_rel))
+        if s < 2.0:
+            return                                             # hover-ish: keep normal init
+        g = float(np.arcsin(np.clip(v_rel[2] / s, -1.0, 1.0)))
+        i = int(np.argmin(np.abs(t["speeds"] - s)))
+        j = int(np.argmin(np.abs(t["gammas"] - g)))
+        R_can = _Rot.from_rotvec(t["rotvecs"][i, j])
+        psi = float(np.arctan2(v_rel[1], v_rel[0]))            # rotate canonical x -> heading
+        scatter = _Rot.from_rotvec(self.np_random.normal(size=3) * np.radians(10.0) / 1.732)
+        R = _Rot.from_euler("z", psi) * R_can * scatter
+        v0 = self.target_vel + self.np_random.normal(size=3) * 1.0
+        did = int(self.DRONE_IDS[0])
+        p.resetBasePositionAndOrientation(did, self.pos[0].tolist(), R.as_quat().tolist(),
+                                          physicsClientId=self.CLIENT)
+        p.resetBaseVelocity(did, v0.tolist(),
+                            (self.np_random.uniform(-0.3, 0.3, size=3)).tolist(),
+                            physicsClientId=self.CLIENT)
+        de = float(t["des"][i, j])
+        self.fin_angles = np.array([de, de])
+        self.motor_forces = np.full(4, float(t["thrusts"][i, j]) / 4.0 * self.M / 13.85)
+        self._updateAndStoreKinematicInformation()
+        self.prev_vel = self.vel[0].copy()
 
     def _resample_target(self):
         d = self.np_random.normal(size=3)
@@ -395,6 +444,17 @@ class RateVelAviary(BaseAviary):
     def _control_wrench(self, thrust_des, omega_des):
         """PID rate inner loop -> achieved (T, tau_body) after per-motor saturation."""
         R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
+        if self.ATT_CMD and self._bz_des is not None:
+            # attitude P (classical-cascade style, runs every physics substep): rotate body-z
+            # toward the commanded direction; yaw rate passes through about body z.
+            bz = R[:, 2]
+            axis = np.cross(bz, self._bz_des)
+            n = float(np.linalg.norm(axis))
+            ang = float(np.arccos(np.clip(bz @ self._bz_des, -1.0, 1.0)))
+            omega_w = self.KATT * (axis / n) * ang if n > 1e-8 else np.zeros(3)
+            omega_des = R.T @ omega_w
+            omega_des[2] = self._yaw_rate_des
+            omega_des = np.clip(omega_des, -self.MAX_RATE, self.MAX_RATE)
         omega_body = R.T @ self.ang_v[0]
         err = omega_des - omega_body
         self.rate_integral = np.clip(self.rate_integral + err * self.PYB_TIMESTEP,
@@ -491,6 +551,15 @@ class RateVelAviary(BaseAviary):
         sub-step; apply achieved wrench + wind + gravity, then update estimators + integrals."""
         self.current_action = np.clip(np.asarray(action, dtype=float).reshape(self.ACT_DIM), -1.0, 1.0)
         thrust_des, omega_des = self._decode_action(self.current_action)
+        if self.ATT_CMD:
+            # a[3:5] -> desired body-z direction (upper hemisphere; norm<=0.985 keeps it well-
+            # conditioned up to ~80 deg tilt); a[5] -> yaw rate about body z.
+            xy = self.current_action[-3:-1]
+            n = float(np.linalg.norm(xy))
+            if n > 0.985:
+                xy = xy * (0.985 / n)
+            self._bz_des = np.array([xy[0], xy[1], np.sqrt(max(1.0 - xy @ xy, 1e-6))])
+            self._yaw_rate_des = float(self.current_action[-1]) * float(self.MAX_RATE[2])
         v_prev = self.vel[0].copy()
 
         fin_alpha = 1.0 - np.exp(-self.PYB_TIMESTEP / self.FIN_TAU)   # servo first-order lag
@@ -575,6 +644,14 @@ class RateVelAviary(BaseAviary):
         parts.append([np.sin(dpsi), np.cos(dpsi)])             # 2  <- heading error (wrap-safe)
         if self.USE_YAW_INTEGRAL:
             parts.append([self.yaw_integral / np.pi])          # 1  <- steady heading-offset nulling
+        if self.PRIV_OBS:                                      # 27 <- CRITIC-ONLY hidden draw
+            parts.append(self.aero_rand - 1.0)                             # 17
+            parts.append([(self.XG - 0.4045) / 0.02,
+                          (self.M - self.NOMINAL_MASS) / 0.25,
+                          (self.motor_tau - 0.09) / 0.07])                 # 3
+            parts.append(self.fin_gain - 1.0)                              # 2
+            parts.append(self.fin_offset / 0.02)                           # 2
+            parts.append(self.wind / max(self.WIND_MAX, 1.0))              # 3
         return np.concatenate(parts).astype(np.float32)
 
     # ---------------------------------------------------------------- reward
@@ -597,24 +674,17 @@ class RateVelAviary(BaseAviary):
         cov = np.exp(-0.5 * (d / W) ** 2)                      # wide velocity coverage
         r_vel = (1.0 - np.tanh(d / 2.0)) + cov
         if self.VEL_PRECISION > 0.0:
-            # narrow precision peak: the d/2 term is ~flat below 2 m/s (92% collected at d=1),
-            # so sub-1 m/s tracking gets almost no gradient without this. Width 0.5 m/s puts
-            # the steepest gradient exactly in the <1 m/s regime the task targets.
+            # narrow precision peak: the d/2 term is ~flat below 2 m/s, so this adds
+            # gradient in the sub-1 m/s regime (width 0.5 m/s)
             r_vel += self.VEL_PRECISION * (1.0 - np.tanh(d / 0.5))
         r_yaw = (1.0 - np.tanh(a / w)) + np.exp(-0.5 * (a / 1.0) ** 2)
         joint = (1.0 - np.tanh(d / 2.0)) * (1.0 - np.tanh(a / w))
-        # yaw GATE: without it, "hold yaw while diving" earns ~1.4/step and every partial
-        # recovery attempt scores worse (yaw disturbed before velocity improves) -> stable
-        # local optimum. Gating yaw by velocity coverage removes the payout in a dive AND
-        # gives a smooth gradient along the recovery path (every m/s arrested raises the gate).
+        # yaw gate: scale the yaw payout by velocity coverage; the floor fraction always pays
         gf = self.YAW_GATE_FLOOR
         gate = (gf + (1.0 - gf) * cov) if self.YAW_GATE else 1.0
         if self.YAW_ATT_GATE:
-            # attitude gate: in wing-borne flight the nose must follow the velocity vector (the
-            # only free rotation is roll about the flight path), so a random desired_yaw is
-            # structurally unsatisfiable at speed — and an always-on yaw reward punishes the
-            # ALIGNED (small-alpha) attitude the vehicle needs there, locking it into draggy
-            # half-transitioned flight (measured: mean |alpha| 53-82 deg at 20-45 m/s).
+            # attitude gate: in wing-borne flight the nose must follow the velocity vector,
+            # so a random desired_yaw is structurally unsatisfiable at speed.
             # R[2,2] = 1 in hover (yaw fully enforced) -> 0 at 90-deg tilt (yaw released).
             gate = gate * float(np.clip(R[2, 2], 0.0, 1.0))
         reward = r_vel + self.YAW_WEIGHT * gate * r_yaw + 0.5 * joint - (0.02 / s) * d + smooth

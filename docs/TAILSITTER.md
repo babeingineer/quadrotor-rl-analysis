@@ -17,7 +17,7 @@ oversampling, a dive curriculum, and longer episodes — **failed** to move the 
 saturation extra steps actively **regressed**. The winning run — referred to throughout as the
 **champion** — is the 16 M-step policy with the integrator + tanh reward.
 
-![Tailsitter training arc — error across every run](docs/fig_ts_arc.png)
+![Tailsitter training arc — error across every run](fig_ts_arc.png)
 
 *Green = integrator runs (the breakthrough); bright green = **champion** (+ sharp tanh reward). Red =
 failed levers: **longer-episodes** (confounded), **bigger-net-4M** (hover collapse from undertraining),
@@ -66,7 +66,7 @@ The learned hover→cruise transition (12M integrator checkpoint, target 55 m/s 
 tilts from 0° (hover, props up) toward ~86° (near-horizontal, wing-borne cruise) while velocity
 tracks cleanly to target.
 
-![Tailsitter transition — 12M integrator checkpoint](docs/fig_ts_transition.png)
+![Tailsitter transition — 12M integrator checkpoint](fig_ts_transition.png)
 
 ### Disturbance observer (now total external force)
 Unchanged formula, but its meaning broadened: `F_ext = m_nom·a − F_thrust + m_nom·g` now lumps

@@ -56,3 +56,9 @@ CRASH + RELAUNCH section).
 - 2026-07-31 00:5x: **recipe revised γ 0.999 → 0.997** (same reasoning as trial 23: xw22b
   showed γ 0.999 regresses + collapses yaw; 0.997 is the empirical best-velocity-at-speed
   anchor from xw17). Command block above still accurate otherwise.
+
+## ABORTED (2026-07-31 11:3x) — recipe invalidated before producing results
+xw23b failed decisively (10.51 @ mid, see trial 23) with the same core recipe this run
+uses; killed at ~45 min rather than spend 12+ h on a 0-for-2 combination. Will be
+REDESIGNED once the xw26/xw25 isolation verdicts identify the poisonous ingredient(s).
+The trim-feasibility motivation (100% of high-band draws physically trackable) still stands.

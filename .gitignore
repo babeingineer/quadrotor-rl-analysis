@@ -7,6 +7,7 @@ results_*/
 *.log
 *.sh
 *.done
+*.npz
 
 # trained models / normalization stats / replay buffers
 *.zip
@@ -50,3 +51,6 @@ ENV/
 *.swp
 .DS_Store
 Thumbs.db
+
+# keep dependency manifest despite *.txt rule
+!requirements.txt

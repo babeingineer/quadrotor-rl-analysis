@@ -166,7 +166,7 @@ randomization. Aggregate over 100 random scenarios:
 disturbance observer. The residual failures are the **high-speed (>15 m/s) thrust-envelope
 corner** — a physical limit, not a sensing one.
 
-![Velocity tracking](docs/fig_velocity_track.png)
+![Velocity tracking](fig_velocity_track.png)
 
 ### 6.2 PPO vs SAC (velocity task)
 
@@ -189,14 +189,14 @@ randomization (return peaks early then drifts down); tuning (lower LR, gSDE, sma
 ratio, bigger net) recovered it from broken (4.09 m/s, 18% crash) to a close second
 (1.48 m/s, 2% crash) but did not overtake PPO. For this task, PPO is strictly better.
 
-![PPO vs SAC](docs/fig_ppo_vs_sac.png)
+![PPO vs SAC](fig_ppo_vs_sac.png)
 
 **Hover inference — all three runnable velocity policies** (driven as position controllers
 through the outer P-loop). The PPO policy holds tightest and flattest (0.12 m calm, 0.18 m in
 15 m/s wind); both SAC policies vibrate through the loop, and the untuned SAC policy diverges
 under wind — the structural instability that tuning narrowed but never removed.
 
-![Velocity policies — hover (all models)](docs/fig_all_hover_velocity.png)
+![Velocity policies — hover (all models)](fig_all_hover_velocity.png)
 
 > The three earliest velocity models (`results_sac`, `results_fs`, `results_sac_fs`)
 > predate the 29-dim RPM+wind observation (their obs is 22-dim / 88-dim frame-stacked), so
@@ -215,7 +215,7 @@ were flat from 3M→9M, then improved sharply by 12M (late-stage refinement):
 | 9M | 0.12 m | 0.21 m | 2.6 m |
 | **12M** | **0.06 m** | **0.03 m** | **0.33 m** |
 
-![Position training curve](docs/fig_pos_training.png)
+![Position training curve](fig_pos_training.png)
 
 ### 6.4 Hover / station-keeping
 
@@ -225,7 +225,7 @@ directly, with no proportional-controller steady-state error. Note the position 
 a larger initial transient (it was trained on static targets and starts cold), but a much
 tighter steady state.
 
-![Hover comparison](docs/fig_hover.png)
+![Hover comparison](fig_hover.png)
 
 **Hover inference — all six position policies.** This single plot is the whole
 position story: the too-sharp reward (`exp σ=0.3`) makes the target *unreachable* and the
@@ -234,14 +234,14 @@ recovers to 0.66 m; and **pure additional training** with an unchanged reward ti
 monotonically 0.66 → 0.18 → 0.11 → **0.06 m** (calm) across the four training-length runs,
 and to **0.03 m** in 15 m/s wind. No reward trick did this — steps did.
 
-![Position policies — hover (all models)](docs/fig_all_hover_position.png)
+![Position policies — hover (all models)](fig_all_hover_position.png)
 
 ### 6.5 Step response (4 m)
 
 The 12M position policy reaches the target with only **0.33 m overshoot** and settles to
 **0.02 m**. The velocity+loop overshoots more here because its outer-loop gain is untuned.
 
-![Step response](docs/fig_step.png)
+![Step response](fig_step.png)
 
 ### 6.6 Trajectory tracking (3 m circle, 8 s)
 
@@ -254,7 +254,7 @@ Both approaches have room to improve on *dynamic* paths:
 Fixing this is known work: tune the outer loop, and/or train the position policy on
 **moving** targets.
 
-![Trajectory tracking](docs/fig_trajectory.png)
+![Trajectory tracking](fig_trajectory.png)
 
 **Circle inference — every runnable model.** Confirms the weakness is *general*, not specific
 to one checkpoint. All six position policies phase-lag the moving reference (RMS 3.5–4.6 m) —
@@ -263,9 +263,9 @@ was trained on *static* goals. The velocity policies + outer loop overshoot the 
 entry then spiral in (the PPO policy best at 2.57 m RMS); the aggressive `Kp=1.5` is the culprit.
 More training tightens *hover* but not *path tracking* — that needs training on moving targets.
 
-![Velocity policies — circle (all models)](docs/fig_all_path_velocity.png)
+![Velocity policies — circle (all models)](fig_all_path_velocity.png)
 
-![Position policies — circle (all models)](docs/fig_all_path_position.png)
+![Position policies — circle (all models)](fig_all_path_position.png)
 
 ---
 

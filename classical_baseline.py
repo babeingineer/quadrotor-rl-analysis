@@ -1,5 +1,4 @@
-"""Classical 'manual-control' baseline for the velyaw task — tests the user's premise:
-"if we can do it manually, RL can too."
+"""Classical 'manual-control' baseline for the velyaw task.
 
 Cascade: velocity error (P + TRUE integral) + disturbance-observer feedforward
   -> desired force vector -> thrust magnitude + desired body-z direction
@@ -21,10 +20,10 @@ class ClassicalController:
         self.kp, self.ki, self.katt, self.kyaw = kp, ki, katt, kyaw
         self.int_clamp = int_clamp
         self.ff = ff   # observer feedforward scale (1=full; <1 damps the est-attitude coupling loop)
-        self.kfin = kfin  # ELEVON assist: elevator follows the pitch-axis command like a
-        #                   pilot's elevator hand (surfaces = V^2-scaling authority at speed)
-        self.v0 = v0   # GAIN SCHEDULING speed (m/s): gains shrink ~1/(1+(V/v0)^2) like a human
-        #               pilot making smaller inputs at speed; 0 = fixed gains (hover paradigm)
+        self.kfin = kfin  # elevon assist: elevator follows the pitch-axis command
+        #                   (surface authority scales with V^2)
+        self.v0 = v0   # gain-scheduling speed (m/s): gains shrink ~1/(1+(V/v0)^2);
+        #               0 = fixed gains
         self.iv = np.zeros(3)                       # TRUE (non-leaky) velocity-error integral
         self.m_nom = env.NOMINAL_MASS
         self.g = 9.8
@@ -66,8 +65,8 @@ class ClassicalController:
             dpsi = e._yaw_error(R)
             omega_b[2] = -self.kyaw * dpsi
         pqr = np.clip(omega_b / e.MAX_RATE, -1.0, 1.0)
-        # elevons: symmetric deflection (elevator) assists the pitch channel; effectiveness
-        # grows with V^2 naturally, so this is the control a pilot leans on at speed
+        # elevons: symmetric deflection (elevator) assists the pitch channel;
+        # effectiveness grows with V^2
         fin = float(np.clip(self.kfin * pqr[1], -1.0, 1.0)) if self.kfin > 0.0 else 0.0
         return np.array([fin, fin, float(np.clip(aT, -1, 1)), pqr[0], pqr[1], pqr[2]])
 

@@ -210,7 +210,7 @@ recover the true wind force to ~0 N). Velocity reward unchanged. `n_stack=1`.
 controllers via the outer P-loop). PPO T6 is flat and tight; SAC T7 diverges under wind and
 SAC T8 (tuned) still oscillates — the structural SAC instability, made visible.
 
-![Velocity hover — T6/T7/T8](docs/fig_all_hover_velocity.png)
+![Velocity hover — T6/T7/T8](fig_all_hover_velocity.png)
 
 > T3 `results_sac` (OBS-V22), T4 `results_fs` and T5 `results_sac_fs` (88-dim frame-stack)
 > predate the 29-dim RPM+wind obs and **cannot be re-run** against the current env — their
@@ -319,7 +319,7 @@ Targets sampled at distance `Uniform(0, POS_RANGE)`, random direction, incl. nea
 then pure additional training tightens hover monotonically to 0.06 m calm / 0.03 m wind. The
 reward tricks (T14→T15 stop-distance penalty) did *not* move the needle — steps did.
 
-![Position hover — T11..T16](docs/fig_all_hover_position.png)
+![Position hover — T11..T16](fig_all_hover_position.png)
 
 **Circle inference — every runnable model** (position policies direct; velocity policies via
 outer loop). Shows the path-tracking weakness is *general*: all position policies phase-lag a
@@ -327,9 +327,9 @@ moving reference (RMS 3.5–4.6 m, trained on static goals); velocity+loop overs
 (`Kp=1.5` too hot) then spirals in (PPO T6 best, 2.57 m). Fixing this needs moving-target
 training, not more steps.
 
-![Velocity circle — all](docs/fig_all_path_velocity.png)
+![Velocity circle — all](fig_all_path_velocity.png)
 
-![Position circle — all](docs/fig_all_path_position.png)
+![Position circle — all](fig_all_path_position.png)
 
 ---
 

@@ -1,10 +1,9 @@
 """RecurrentPPO (LSTM) trainer for the velyaw task — same env/reward stack as train.py.
 
 Purpose: implicit per-episode system identification. The +/-20% aero-coefficient DR (plus Xg,
-mass, motor lag, fin gains) makes every episode a slightly different aircraft; a memoryless
-MLP flies the average one. The LSTM can infer THIS episode's parameters from the response to
-its own actions and adapt (the memory-study lesson: keep the hand features anyway — they
-helped even the LSTM).  config.json marks algo="recurrent_ppo" so eval threads hidden state.
+mass, motor lag, fin gains) makes every episode a slightly different aircraft; the LSTM can
+infer the current episode's parameters from the response to its own actions and adapt.
+config.json marks algo="recurrent_ppo" so eval threads the hidden state.
 
     python train_lstm.py --xwing-aero --yaw-bias 0.3 --max-speed 25 --wind-max 15 \
         --yaw-gate --yaw-att-gate --vel-precision 0.7 --cov-width 5 --ent-coef 0.003 \
