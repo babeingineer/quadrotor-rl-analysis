@@ -96,6 +96,15 @@ def main():
                     help="attitude-setpoint action interface (thrust + desired body-z + yaw "
                          "rate -> inner attitude P -> rate PID)")
     ap.add_argument("--katt", type=float, default=1.5, help="attitude-P gain for --att-cmd")
+    ap.add_argument("--fin-assist", type=float, default=0.0,
+                    help="att-cmd: elevator follows the pitch-rate command with this gain "
+                         "(fin authority scales with V^2; motor torque does not)")
+    ap.add_argument("--ctrl-freq", type=int, default=50,
+                    help="policy rate (Hz); physics stays 500 Hz. When raising this, rescale "
+                         "gamma to keep the same TIME horizon (e.g. 50->100 Hz: 0.99->0.995)")
+    ap.add_argument("--air-obs", action="store_true",
+                    help="DIAGNOSTIC: actor observes true body-frame air-relative velocity "
+                         "(3 dims); tests whether the strong-wind tail is an observability gap")
     ap.add_argument("--priv-critic", action="store_true",
                     help="asymmetric actor-critic: critic sees the hidden episode draw "
                          "(27 dims appended to obs); actor sees only the deployable obs "
@@ -107,6 +116,12 @@ def main():
     ap.add_argument("--yaw-gate-floor", type=float, default=0.2,
                     help="fraction of the yaw reward that always pays (gate floor)")
     ap.add_argument("--ent-coef", type=float, default=0.0)
+    ap.add_argument("--gae-lambda", type=float, default=0.95,
+                    help="GAE lambda; rescale with ctrl rate to keep the same TIME window "
+                         "(50->100 Hz: 0.95 -> 0.975)")
+    ap.add_argument("--n-steps", type=int, default=2048,
+                    help="PPO rollout length per env; double with ctrl rate to span the "
+                         "same seconds")
     ap.add_argument("--gamma", type=float, default=0.99,
                     help="discount factor (0.99 at 50 Hz control = ~2 s value horizon)")
     ap.add_argument("--episode-len", type=float, default=8.0,
@@ -148,7 +163,8 @@ def main():
                "wind_curriculum": args.wind_curriculum, "yaw_gate": args.yaw_gate,
                "yaw_gate_floor": args.yaw_gate_floor, "vel_precision": args.vel_precision,
                "trim_init": args.trim_init, "priv_critic": args.priv_critic,
-               "att_cmd": args.att_cmd, "katt": args.katt,
+               "att_cmd": args.att_cmd, "katt": args.katt, "ctrl_freq": args.ctrl_freq,
+               "fin_assist": args.fin_assist, "air_obs": args.air_obs,
                "yaw_att_gate": args.yaw_att_gate, "cov_width": args.cov_width,
                "kp_rate": args.kp_rate, "ki_rate": args.ki_rate,
                "aero_dr": not args.no_aero_dr, "integral_tau": args.integral_tau,
@@ -168,7 +184,9 @@ def main():
                        kp_rate=tuple(float(x) for x in args.kp_rate.split(",")),
                        ki_rate=tuple(float(x) for x in args.ki_rate.split(",")),
                        aero_dr=not args.no_aero_dr, integral_tau=args.integral_tau,
-                       priv_obs=args.priv_critic, att_cmd=args.att_cmd, katt=args.katt)
+                       priv_obs=args.priv_critic, att_cmd=args.att_cmd, katt=args.katt,
+                       ctrl_freq=args.ctrl_freq, fin_assist=args.fin_assist,
+                       air_obs=args.air_obs)
     # tough/trim init only shape TRAINING; eval keeps the level start -> comparable metric
     train_kwargs = dict(base_kwargs, randomize_init=True, tough_init_frac=args.tough_init,
                         trim_init_frac=args.trim_init)
@@ -186,8 +204,8 @@ def main():
         pk["actor_dim"] = int(train_env.observation_space.shape[0]) - 27
     model = PPO(
         policy, train_env,
-        n_steps=2048, batch_size=4096, n_epochs=10,
-        gamma=args.gamma, gae_lambda=0.95, clip_range=0.2,
+        n_steps=args.n_steps, batch_size=4096, n_epochs=10,
+        gamma=args.gamma, gae_lambda=args.gae_lambda, clip_range=0.2,
         ent_coef=args.ent_coef, learning_rate=3e-4, max_grad_norm=0.5,
         policy_kwargs=pk,
         tensorboard_log=os.path.join(args.out_dir, "tb"),

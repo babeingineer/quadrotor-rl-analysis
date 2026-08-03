@@ -44,6 +44,13 @@ def main():
                     help="set/override the coverage Gaussian width (m/s)")
     ap.add_argument("--model-file", type=str, default=None,
                     help="explicit model zip to resume from (default src/ppo_ratevel_final.zip)")
+    ap.add_argument("--wind-oversample", type=float, default=None,
+                    help="set/override strong-wind episode oversampling for this continuation "
+                         "(training-distribution change: safe on continuation)")
+    ap.add_argument("--max-speed-override", type=float, default=None,
+                    help="widen the target-speed envelope for this continuation (band-extension "
+                         "transfer); obs scaling uses the same MAX_SPEED so update config too")
+    ap.add_argument("--speed-min-override", type=float, default=None)
     args = ap.parse_args()
 
     cfg = json.load(open(os.path.join(args.src, "config.json")))
@@ -74,12 +81,22 @@ def main():
                        integral_tau=cfg.get("integral_tau", 3.0),
                        priv_obs=cfg.get("priv_critic", False),
                        att_cmd=cfg.get("att_cmd", False), katt=cfg.get("katt", 1.5),
+                       ctrl_freq=cfg.get("ctrl_freq", 50),
+                       fin_assist=cfg.get("fin_assist", 0.0),
+                       air_obs=cfg.get("air_obs", False),
                        kp_rate=tuple(float(x) for x in cfg.get("kp_rate", "6,6,4").split(",")),
                        ki_rate=tuple(float(x) for x in cfg.get("ki_rate", "0.5,0.5,0.3").split(",")))
+    if args.wind_oversample is not None:
+        cfg["wind_oversample"] = args.wind_oversample
+    if args.max_speed_override is not None:
+        cfg["max_speed"] = args.max_speed_override
+    if args.speed_min_override is not None:
+        cfg["speed_min"] = args.speed_min_override
     # same tough/trim-init mix as the source run; wind stays at the full post-curriculum value
     train_kwargs = dict(base_kwargs, randomize_init=True,
                         tough_init_frac=cfg.get("tough_init", 0.0),
-                        trim_init_frac=cfg.get("trim_init", 0.0))
+                        trim_init_frac=cfg.get("trim_init", 0.0),
+                        wind_oversample=cfg.get("wind_oversample", 0.0))
     eval_kwargs = dict(base_kwargs, randomize_init=False)
     os.makedirs(args.out, exist_ok=True)
     json.dump(cfg, open(os.path.join(args.out, "config.json"), "w"))

@@ -36,7 +36,7 @@ physical metrics, behavior traces), and the analysis/verdict.
 | 25 | [25_xw25_lowband_isolation.md](25_xw25_lowband_isolation.md) | `results_velyaw_xw25(b)` | **ISOLATION**: xw18b + ONLY true integrator + 20 s (γ 0.99, default gains) | **vel 0.93 med ≈ xw18b (pair EXONERATED on velocity) but yaw 90° at γ0.99** → γ never the yaw driver; E4 dead; standing recipe = leaky τ3 / 8 s / γ0.99 |
 | 27 | [27_xw27_trim_init.md](27_xw27_trim_init.md) | `results_velyaw_xw27(b)` | **E1**: mid band + trim-init 0.2 (goal-state exposure; ONE change vs xw26) — inflight-hold discriminator proved the hold skill is missing | **BIGGEST SINGLE-CHANGE MID GAIN: 4.09 / median 3.44 / yaw 14.5°** (was 6.33/4.44/52°); hold 3.27 from trim → hold quality is the whole residual |
 | 33 | [33_xw27_budget_ladder.md](33_xw27_budget_ladder.md) | `results_velyaw_xw27c/d` | **K4a auto-ladder** on xw27b: +8M stages while median improves >7% | 20M: 2.61 → 28M: 1.72 → 36M: **median 1.29** (−25%, still climbing) → 44M running |
-| 32 | [32_xw32_att_cmd.md](32_xw32_att_cmd.md) | `results_velyaw_xw32(b)` | **ATT-CMD**: attitude-setpoint interface (structural trim stabilization) + trim-init | 12M: 2.35 → 20M: 1.52 → 28M: **ROBUST median 1.09 [0.99–1.20], 45%<1** → 36M running |
+| 32 | [32_xw32_att_cmd.md](32_xw32_att_cmd.md) | `results_velyaw_xw32(b)` | **ATT-CMD**: attitude-setpoint interface (structural trim stabilization) + trim-init | ★ CLOSED @36M: **ROBUST median 0.92 [0.85–1.04], 53%<1 — first sub-1 band** (44M stage flat → self-stopped); tail arm queued for the ≥85% bar |
 | 31 | [31_xw31_precision_reshape.md](31_xw31_precision_reshape.md) | `results_velyaw_xw31(b)` | **ARM B**: precision weight 0.7→1.5 (incentive hypothesis; vs xw27) | **FLAT: 3.67 med** ≈ xw27 — incentive refuted |
 | 30 | [30_xw30_priv_critic.md](30_xw30_priv_critic.md) | `results_velyaw_xw30(b)` | **ARM A / E6**: privileged critic (advantage-noise hypothesis; vs xw27) | **FAILURE: 5.13 med** (regression) — advantage noise refuted |
 | 29 | [29_xw29_highband_trim_init.md](29_xw29_highband_trim_init.md) | `results_velyaw_xw29(b)` | HIGH anchor + trim-init 0.2 | **BEST HIGH EVER: 7.38 / median 5.88** @8s (prior 8.62 med @20s); hold 6.29 from trim → same hold deficit as mid |
@@ -64,3 +64,9 @@ physical metrics, behavior traces), and the analysis/verdict.
 - Tailsitter VTOL 0–80 m/s velocity tracking (integrator/tanh/memory study):
   [../docs/TAILSITTER.md](../docs/TAILSITTER.md)
 - General lessons: [../docs/LESSONS.md](../docs/LESSONS.md)
+
+## Directional-objective spec (user decision, 2026-08-03)
+Yaw is commanded and scored at **hover/low speed only**; in fast flight the nose follows
+the velocity vector and yaw is free (the attitude gate implements exactly this). Yaw
+columns for mid/high/vhigh/top rows are informational. The deep-research report's
+course-aware heading redesign is NOT adopted — unnecessary under this spec.

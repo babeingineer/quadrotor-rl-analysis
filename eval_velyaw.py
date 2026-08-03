@@ -51,6 +51,9 @@ def load(D, ep_len=10.0, **overrides):
               integral_tau=cfg.get("integral_tau", 3.0),
               priv_obs=cfg.get("priv_critic", False),
               att_cmd=cfg.get("att_cmd", False), katt=cfg.get("katt", 1.5),
+              ctrl_freq=cfg.get("ctrl_freq", 50),
+              fin_assist=cfg.get("fin_assist", 0.0),
+              air_obs=cfg.get("air_obs", False),
               kp_rate=tuple(float(x) for x in cfg.get("kp_rate", "6,6,4").split(",")),
               ki_rate=tuple(float(x) for x in cfg.get("ki_rate", "0.5,0.5,0.3").split(",")),
               randomize_init=False)

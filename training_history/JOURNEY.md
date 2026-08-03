@@ -95,3 +95,10 @@ Provoked by the user's premise "if a human can fly it, RL can learn it." Finding
   fairly (classical proves 0.20 median possible) | high RL 8.94 (classical median 3.90).
 - Physics is proven not to be the limiter anywhere. The <1 m/s campaign is now pure
   robustness engineering: per-band recipes, then merge (per-band policies or distillation).
+
+## ★ 2026-08-02 — first sub-1 band
+Mid band (10–18 m/s) robust median **0.92 [0.85–1.04], 53% <1** under the full spec
+(wind 0–15, ±20% DR), at 36M steps. The recipe that did it, in causal order: trim-init
+(goal-state exposure) + attitude-setpoint interface (structural stabilization of the
+unstable wing-borne trim) + robust-CI-gated budget ladder. Now transferring to the high
+band (trial 37), then the 25–45 m/s extension.

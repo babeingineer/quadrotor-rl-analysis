@@ -150,3 +150,7 @@ wind bins: [0-5) n=23 med 0.82 <1: 65%  [5-10) n=42 med 1.40 <1: 40%  [10-15) n=
   t= 4.0 |v|= 12.4 vz=   0.8 tilt=  32 verr=  3.5 yawerr= +12.0 fins=(+20.0,+12.1) thr=-0.14
   t= 6.0 |v|= 13.8 vz=   0.6 tilt=  35 verr=  1.3 yawerr= +11.3 fins=(+20.0,-20.0) thr=-0.31
 ```
+- Fine-tune (xw27g, +6M @3e-5 from 44M): robust median **1.34 [1.20–1.62]** ≈ xw27e's
+  1.39 [1.14–1.62] — **NULL**. Low-LR convergence does not break the plateau; the
+  rate-interface lineage is closed at ~1.35–1.4 median. The att-cmd lineage (xw32e)
+  carries the <1 push; xw34 (dose 0.4) auto-launched on this chain.

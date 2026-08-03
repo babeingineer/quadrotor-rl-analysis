@@ -58,6 +58,16 @@ class RateVelAviary(BaseAviary):
                  #                                   body-z + yaw rate) -> inner attitude P ->
                  #                                   rate PID
                  katt: float = 1.5,                # attitude-P gain for att_cmd mode
+                 fin_assist: float = 0.0,          # att_cmd: elevator follows the pitch-rate
+                 #                                   command (fin authority scales with V^2,
+                 #                                   motor torque does not); policy fin action
+                 #                                   adds on top
+                 wind_oversample: float = 0.0,     # fraction of TRAINING episodes whose wind
+                 #                                   magnitude is drawn U(8, WIND_MAX) instead
+                 #                                   of U(0, WIND_MAX) (strong-wind tail focus)
+                 air_obs: bool = False,            # DIAGNOSTIC: actor sees true body-frame
+                 #                                   air-relative velocity (3 dims); deployment
+                 #                                   would need an observer for this
                  # --- observation features ---
                  use_wind_est: bool = True,        # disturbance-observer external-force estimate
                  use_vel_integral: bool = True,    # leaky+clamped velocity-error integral
@@ -123,8 +133,12 @@ class RateVelAviary(BaseAviary):
         self.PRIV_OBS = bool(priv_obs)
         self.ATT_CMD = bool(att_cmd)
         self.KATT = float(katt)
+        self.FIN_ASSIST = float(fin_assist)
+        self.WIND_OVERSAMPLE = float(wind_oversample)
+        self.AIR_OBS = bool(air_obs)
         self._bz_des = None
         self._yaw_rate_des = 0.0
+        self._omega_des_last = np.zeros(3)
         self.USE_WIND_EST = bool(use_wind_est)
         self.USE_VEL_INTEGRAL = bool(use_vel_integral)
         self.USE_YAW_INTEGRAL = bool(use_yaw_integral)
@@ -244,6 +258,8 @@ class RateVelAviary(BaseAviary):
         # same "sense the actuator" rationale as motor RPM)
         dim = 27 + (3 if self.USE_WIND_EST else 0) + (3 if self.USE_VEL_INTEGRAL else 0) \
               + 2 + (1 if self.USE_YAW_INTEGRAL else 0) + (4 if self.USE_ELEVONS else 0)
+        if self.AIR_OBS:
+            dim += 3
         # privileged tail (CRITIC-ONLY): hidden episode draw appended so an asymmetric
         # critic can predict returns; the actor slices it off (priv_policy.py)
         if self.PRIV_OBS:
@@ -331,7 +347,10 @@ class RateVelAviary(BaseAviary):
         wdir = self.np_random.normal(size=3)
         n = np.linalg.norm(wdir)
         wdir = wdir / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
-        self.wind = wdir * self.np_random.uniform(0.0, self.WIND_MAX)
+        w_lo = 0.0
+        if self.WIND_OVERSAMPLE > 0.0 and self.np_random.uniform() < self.WIND_OVERSAMPLE:
+            w_lo = min(8.0, self.WIND_MAX)
+        self.wind = wdir * self.np_random.uniform(w_lo, self.WIND_MAX)
 
         # wing area + motor lag (hidden per-episode parameters)
         self.wing_area = self.WING_AREA_NOM * (
@@ -455,6 +474,7 @@ class RateVelAviary(BaseAviary):
             omega_des = R.T @ omega_w
             omega_des[2] = self._yaw_rate_des
             omega_des = np.clip(omega_des, -self.MAX_RATE, self.MAX_RATE)
+            self._omega_des_last = omega_des
         omega_body = R.T @ self.ang_v[0]
         err = omega_des - omega_body
         self.rate_integral = np.clip(self.rate_integral + err * self.PYB_TIMESTEP,
@@ -565,7 +585,12 @@ class RateVelAviary(BaseAviary):
         fin_alpha = 1.0 - np.exp(-self.PYB_TIMESTEP / self.FIN_TAU)   # servo first-order lag
         for _ in range(self.PYB_STEPS_PER_CTRL):
             if self.USE_ELEVONS:
-                fin_cmd = (self.FIN_MAX * self.current_action[:2]) * self.fin_gain + self.fin_offset
+                fin_norm = self.current_action[:2]
+                if self.ATT_CMD and self.FIN_ASSIST > 0.0:
+                    assist = float(np.clip(self.FIN_ASSIST * self._omega_des_last[1]
+                                           / self.MAX_RATE[1], -1.0, 1.0))
+                    fin_norm = np.clip(fin_norm + assist, -1.0, 1.0)
+                fin_cmd = (self.FIN_MAX * fin_norm) * self.fin_gain + self.fin_offset
                 self.fin_angles += (fin_cmd - self.fin_angles) * fin_alpha
                 self.fin_angles = np.clip(self.fin_angles, -self.FIN_MAX, self.FIN_MAX)
             R, thrust, tau_body = self._control_wrench(thrust_des, omega_des)
@@ -644,6 +669,8 @@ class RateVelAviary(BaseAviary):
         parts.append([np.sin(dpsi), np.cos(dpsi)])             # 2  <- heading error (wrap-safe)
         if self.USE_YAW_INTEGRAL:
             parts.append([self.yaw_integral / np.pi])          # 1  <- steady heading-offset nulling
+        if self.AIR_OBS:                                       # 3  <- true body-frame airflow
+            parts.append((R.T @ (self.vel[0] - self.wind)) / self.MAX_SPEED)
         if self.PRIV_OBS:                                      # 27 <- CRITIC-ONLY hidden draw
             parts.append(self.aero_rand - 1.0)                             # 17
             parts.append([(self.XG - 0.4045) / 0.02,
