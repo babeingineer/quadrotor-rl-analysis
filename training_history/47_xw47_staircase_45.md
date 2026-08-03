@@ -38,3 +38,11 @@ composite routing (bands overlap by construction).
 - Fine stage 1 (xw49a, 15–27): top-band (22–27) median **2.78 — gate PASSED** → 18–31
   auto-launched (first stage with targets above 30... next stages enter untouched speed
   territory).
+
+## STAIRCASE V2 — coverage-first redesign (evidence: xw49b band breakdown)
+xw49b full report: 18–25 held at 2.49 (≈ xw45b's 2.39) while 25–31 landed at 4.20 —
+trailing bands HOLD but don't mature during upward stages; each ~5 m/s of new territory
+starts ~4. Design consequence: (1) climb to 45 with a FLYABILITY gate (top-band ≤4.5,
+0 crash) — envelope coverage first; (2) then polish each band from its best covering
+checkpoint with the proven stack (dedicated narrow range + oversample + robust ladder —
+the same recipe that delivered low 0.50 and mid 0.82). run_xw50.sh: 21–35 → 24–40 → 27–45.
