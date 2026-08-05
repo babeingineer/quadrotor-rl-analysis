@@ -74,3 +74,11 @@ wind bins: [0-5) n=23 med 3.76 <1: 4%  [5-10) n=42 med 3.85 <1: 0%  [10-15) n=35
   t= 4.0 |v|= 21.4 vz=   2.9 tilt=  33 verr=  2.2 yawerr= +19.0 fins=(-19.9,-20.0) thr=-1.00
   t= 6.0 |v|= 15.5 vz=   1.2 tilt=  63 verr=  4.8 yawerr= -41.8 fins=(-15.2,-11.9) thr=-0.55
 ```
+
+## Exact code changes
+No code changes — flags only on the existing implementation (the feature's code is in the trial cited below).
+(recipe: trial 38.)
+```bash
+# only the band differs:
+  --max-speed 21 --speed-min 18
+```

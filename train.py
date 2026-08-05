@@ -96,6 +96,23 @@ def main():
                     help="attitude-setpoint action interface (thrust + desired body-z + yaw "
                          "rate -> inner attitude P -> rate PID)")
     ap.add_argument("--katt", type=float, default=1.5, help="attitude-P gain for --att-cmd")
+    ap.add_argument("--trim-ff", action="store_true",
+                    help="TRIM FEEDFORWARD: solve the episode's trim once at reset; the "
+                         "policy commands only the deviation from it (a=0 holds trim)")
+    ap.add_argument("--trim-ff-k", type=float, default=0.4,
+                    help="tilt deviation scale for --trim-ff (max ~atan(k))")
+    ap.add_argument("--trim-ff-thrust", type=float, default=0.4,
+                    help="thrust deviation span for --trim-ff, x NOMINAL_HOVER")
+    ap.add_argument("--trim-ff-fin", type=float, default=0.5,
+                    help="elevon deviation span for --trim-ff, x FIN_MAX")
+    ap.add_argument("--trim-ff-est-wind", action="store_true",
+                    help="index the feedforward trim with the observer's wind estimate "
+                         "(deployable) instead of the true wind (privileged ceiling test)")
+    ap.add_argument("--att-rel", action="store_true",
+                    help="body-relative attitude command (constant conditioning at all tilts; "
+                         "a=0 holds the current thrust axis)")
+    ap.add_argument("--att-rel-k", type=float, default=0.5,
+                    help="max per-step tilt correction = atan(k) for --att-rel")
     ap.add_argument("--fin-assist", type=float, default=0.0,
                     help="att-cmd: elevator follows the pitch-rate command with this gain "
                          "(fin authority scales with V^2; motor torque does not)")
@@ -130,11 +147,27 @@ def main():
                     help="coverage Gaussian width in m/s (0 = legacy 10*MAX_SPEED/20)")
     ap.add_argument("--vel-precision", type=float, default=0.0,
                     help="weight of the narrow (1-tanh(d/0.5)) velocity precision peak")
+    ap.add_argument("--rel-approach", type=float, default=0.0,
+                    help="weight of the SCALE-INVARIANT approach basin (0 = legacy). Absolute "
+                         "reward widths go numerically dead far from a fast target (gradient "
+                         "4e-22 at 50 m/s commanded) and the legacy linear pull is scaled by "
+                         "20/MAX_SPEED, so widening the envelope weakens it. This adds a basin "
+                         "whose width tracks the COMMANDED speed and keys the linear pull to it "
+                         "too, leaving every absolute (goal) term untouched. Required to train "
+                         "ONE policy over a wide range; try 1.0")
+    ap.add_argument("--rel-width", type=float, default=0.5,
+                    help="approach-basin width as a fraction of commanded speed")
+    ap.add_argument("--rel-floor", type=float, default=8.0,
+                    help="commanded-speed floor (m/s) so hover/low keeps sane widths")
     ap.add_argument("--yaw-att-gate", action="store_true",
                     help="release the yaw reward in wing-borne flight (clip(R22,0,1) gate)")
     ap.add_argument("--integral-tau", type=float, default=3.0,
                     help="velocity/yaw integral leak time constant (s); very large (1e6) "
                          "approximates a true integrator")
+    ap.add_argument("--yaw-integral-tau", type=float, default=None,
+                    help="separate leak for the YAW integral (default: same as "
+                         "--integral-tau); keep this short when using a long velocity "
+                         "integral, since heading error is unsatisfiable at speed")
     ap.add_argument("--no-aero-dr", action="store_true",
                     help="ABLATION: fixed nominal aerodynamics (no 17-coeff/Xg randomization)")
     ap.add_argument("--kp-rate", type=str, default="25,25,15",
@@ -164,10 +197,17 @@ def main():
                "yaw_gate_floor": args.yaw_gate_floor, "vel_precision": args.vel_precision,
                "trim_init": args.trim_init, "priv_critic": args.priv_critic,
                "att_cmd": args.att_cmd, "katt": args.katt, "ctrl_freq": args.ctrl_freq,
+               "att_rel": args.att_rel, "att_rel_k": args.att_rel_k,
+               "trim_ff": args.trim_ff, "trim_ff_k": args.trim_ff_k,
+               "trim_ff_thrust": args.trim_ff_thrust, "trim_ff_fin": args.trim_ff_fin,
+               "trim_ff_true_wind": not args.trim_ff_est_wind,
                "fin_assist": args.fin_assist, "air_obs": args.air_obs,
                "yaw_att_gate": args.yaw_att_gate, "cov_width": args.cov_width,
+               "rel_approach": args.rel_approach, "rel_width": args.rel_width,
+               "rel_floor": args.rel_floor,
                "kp_rate": args.kp_rate, "ki_rate": args.ki_rate,
                "aero_dr": not args.no_aero_dr, "integral_tau": args.integral_tau,
+               "yaw_integral_tau": args.yaw_integral_tau,
                "ent_coef": args.ent_coef, "gamma": args.gamma,
                "episode_len": args.episode_len},
               open(os.path.join(args.out_dir, "config.json"), "w"))
@@ -180,13 +220,19 @@ def main():
                        velyaw_heading_frame=args.heading_frame, use_xwing_aero=args.xwing_aero,
                        yaw_gate=args.yaw_gate, yaw_gate_floor=args.yaw_gate_floor,
                        vel_precision=args.vel_precision, yaw_att_gate=args.yaw_att_gate,
+                       rel_approach=args.rel_approach, rel_width=args.rel_width,
+                       rel_floor=args.rel_floor,
                        cov_width=args.cov_width,
                        kp_rate=tuple(float(x) for x in args.kp_rate.split(",")),
                        ki_rate=tuple(float(x) for x in args.ki_rate.split(",")),
                        aero_dr=not args.no_aero_dr, integral_tau=args.integral_tau,
+                       yaw_integral_tau=args.yaw_integral_tau,
                        priv_obs=args.priv_critic, att_cmd=args.att_cmd, katt=args.katt,
                        ctrl_freq=args.ctrl_freq, fin_assist=args.fin_assist,
-                       air_obs=args.air_obs)
+                       air_obs=args.air_obs, att_rel=args.att_rel, att_rel_k=args.att_rel_k,
+                       trim_ff=args.trim_ff, trim_ff_k=args.trim_ff_k,
+                       trim_ff_thrust=args.trim_ff_thrust, trim_ff_fin=args.trim_ff_fin,
+                       trim_ff_true_wind=not args.trim_ff_est_wind)
     # tough/trim init only shape TRAINING; eval keeps the level start -> comparable metric
     train_kwargs = dict(base_kwargs, randomize_init=True, tough_init_frac=args.tough_init,
                         trim_init_frac=args.trim_init)

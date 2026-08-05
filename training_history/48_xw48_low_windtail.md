@@ -179,3 +179,19 @@ wind bins: [0-5) n=23 med 0.29 <1: 100%  [5-10) n=42 med 0.43 <1: 90%  [10-15) n
   t= 4.0 |v|=  5.7 vz=   0.2 tilt=   7 verr=  0.3 yawerr=  -0.3 fins=(+20.0,-20.0) thr=-0.04
   t= 6.0 |v|=  5.5 vz=   0.2 tilt=   7 verr=  0.4 yawerr=  +0.6 fins=(+20.0,-20.0) thr=-0.04
 ```
+
+## Exact code changes
+No code changes — flags only on the existing implementation (the feature's code is in the trial cited below).
+(wind oversampling: trial 35.) Gate adds a yaw guard, since yaw IS scored at this band:
+```bash
+  STOP=$("$PY" -c "print(1 if float('$PCT') < float('$PREVP')+5 or float('$YAW') > 10 else 0)")
+```
+
+## Seed reproduction of the low-band recipe (12M stage, before the oversample ladder)
+- seed 1: **median 0.96 [CI 0.86–1.09], 53% <1** — reproduces sub-1 median from a different
+  seed, though above the champion's 12M-stage figure; seed 2 running.
+Note the champion (xw48c, 0.46 / 76%) is the END of a 3-stage oversample ladder from a
+different seed, so the fair comparison for these seeds is the pre-ladder stage, not 0.46.
+- seed 2: **median 0.92 [CI 0.82–1.07], 54% <1** — reproduces seed 1 (0.96) closely.
+**Low-band recipe is seed-robust: 0.92 / 0.96 at the 12M stage across two fresh seeds, both
+sub-1 median.** (Champion 0.46 / 76% is that recipe plus a 3-stage oversample ladder.)

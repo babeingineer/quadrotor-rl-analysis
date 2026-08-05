@@ -35,3 +35,11 @@ bandwidth does not help the POLICY learn (likely amplifies noise/oscillation cos
 Ladder killed. High-band base remains xw38c (4.67). Next levers per pre-registration:
 band-split (18–21/21–25) or high-band trim-init dose — queued behind the airflow
 diagnostic's verdict (wind observability may matter at high band too).
+
+## Exact code changes
+No code changes — flags only on the existing implementation (the feature's code is in the trial cited below).
+(fin-assist + attitude authority: trial 38.)
+```bash
+# only these differ from trial 38:
+  --katt 5.0 --fin-assist 4.0
+```

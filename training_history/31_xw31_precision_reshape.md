@@ -80,3 +80,15 @@ trial 30: NEITHER value noise nor incentive binds the hold skill.
 wing-borne equilibrium + a half-tilt zero-thrust behavioral attractor. The policy
 cannot learn 50 Hz stabilization of an unstable state by exposure; the classical
 cascade holds 0.20 median there because its attitude P-loop stabilizes STRUCTURALLY.
+
+## Exact code changes
+No env/trainer code change — one flag value on the existing precision term:
+```bash
+python train.py ... --vel-precision 1.5     # was 0.7
+```
+```python
+# rate_vel_aviary.py — the term being scaled (unchanged, quoted for reference):
+        r_vel = (1.0 - np.tanh(d / 2.0)) + cov
+        if self.VEL_PRECISION > 0.0:
+            r_vel += self.VEL_PRECISION * (1.0 - np.tanh(d / 0.5))
+```

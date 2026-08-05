@@ -145,3 +145,36 @@ record now belongs to this lineage.
 TERMINATED. **Mid-band champion: xw35b — 0.82 [0.73–0.89], 62% <1** (median goal met;
 the ≥85% bar now depends on the airflow-observability verdict, trial 41: observer path
 vs sensor-suite ceiling).
+
+## Exact code changes
+```python
+# rate_vel_aviary.py — constructor arg (NEW):
+                 wind_oversample: float = 0.0,     # fraction of TRAINING episodes whose wind
+                 #                                   magnitude is drawn U(8, WIND_MAX) instead
+                 #                                   of U(0, WIND_MAX) (strong-wind tail focus)
+
+# rate_vel_aviary.py — stored in __init__ (NEW):
+        self.WIND_OVERSAMPLE = float(wind_oversample)
+
+# rate_vel_aviary.py — _housekeeping(), wind draw (CHANGED):
+#   was: self.wind = wdir * self.np_random.uniform(0.0, self.WIND_MAX)
+        w_lo = 0.0
+        if self.WIND_OVERSAMPLE > 0.0 and self.np_random.uniform() < self.WIND_OVERSAMPLE:
+            w_lo = min(8.0, self.WIND_MAX)
+        self.wind = wdir * self.np_random.uniform(w_lo, self.WIND_MAX)
+
+# continue_train.py — flag (NEW) + config override (NEW):
+    ap.add_argument("--wind-oversample", type=float, default=None,
+                    help="set/override strong-wind episode oversampling for this continuation "
+                         "(training-distribution change: safe on continuation)")
+
+    if args.wind_oversample is not None:
+        cfg["wind_oversample"] = args.wind_oversample
+
+# continue_train.py — train_kwargs (CHANGED):
+    train_kwargs = dict(base_kwargs, randomize_init=True,
+                        tough_init_frac=cfg.get("tough_init", 0.0),
+                        trim_init_frac=cfg.get("trim_init", 0.0),
+                        wind_oversample=cfg.get("wind_oversample", 0.0))
+```
+Eval is unaffected: the true (uniform) wind distribution is used for all scoring.

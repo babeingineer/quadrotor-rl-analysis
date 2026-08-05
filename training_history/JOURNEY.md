@@ -1,8 +1,26 @@
-# The journey: 81.7 → 5.26 m/s (velyaw task, XWing physics)
+# The journey: 81.7 → 0.44 m/s (velyaw task, XWing physics)
 
-Concise record of how velocity error improved 15×, what failed, what worked, and why.
-Details per trial: [INDEX.md](INDEX.md). Benchmark: 120 eps, level start; wind 0–20 m/s
-through trial 10, **0–15 m/s (real spec) from trial 11**. Target: **< 1 m/s** (in progress).
+Concise record of how velocity error improved ~185× on the bands that were solved, what failed,
+what worked, and why. Details per trial: [INDEX.md](INDEX.md). Benchmark: wind 0–20 m/s through
+trial 10, **0–15 m/s (real spec) from trial 11**; from trial 59 the headline is the **composite**
+(band specialists routed by commanded speed) under full DR.
+
+**FINAL STATE (2026-08-05, campaign stopped by user directive — no new training).**
+
+| band | median | %<1 | recovery from upset |
+|---|---|---|---|
+| hover 0–1 | 0.27 | 80% | — |
+| low 1–10 | **0.44** | 75% | 60% |
+| mid 10–18 | **0.77** | 64% | 57% |
+| high 18–25 | 1.77 | 27% | 35% |
+| vhigh 25–34 | 5.73 | 3% | 32% |
+| pooled | 1.22 [CI 1.04–1.60] | 44% | 46% [40–53] |
+
+**Goal met on 0–18 m/s; missed above it; 34–50 m/s never covered by any policy.** The target
+moved 0–25 → 0–45 → 0–50 m/s over the campaign. Trims are verified feasible within actuator
+limits to 60 m/s, so what remains is controller quality, not physics. The likely reason the fast
+bands never trained is documented at trial 70 (a reward that goes numerically dead at speed) —
+found by reading the reward, quantified, implemented, and **never trained**.
 
 ## The scoreboard
 
@@ -102,3 +120,98 @@ Mid band (10–18 m/s) robust median **0.92 [0.85–1.04], 53% <1** under the fu
 (goal-state exposure) + attitude-setpoint interface (structural stabilization of the
 unstable wing-borne trim) + robust-CI-gated budget ladder. Now transferring to the high
 band (trial 37), then the 25–45 m/s extension.
+
+## Range-width lesson (trials 62/63, 2026-08-05)
+At high dynamic pressure the training SPAN matters as much as the recipe:
+- 25-34 trained on 21-34 (scaffold below the band): **3.77 median**
+- the same lineage narrowed to 25-34: 5.06
+- a lineage stretched to 27-40 then narrowed: 5.30
+Coverage and precision trade off inside one network, and an all-hard target distribution
+removes the easy-win gradient that keeps a policy competent. Practical rule adopted, then CORRECTED (trial 65): re-running 18-25 with scaffold below it
+(train 14-25) gave 2.48 vs the champion's 2.03 - the rule did not transfer. The 25-34
+champion's edge came from its LINEAGE (it climbed through slower speeds over many stages),
+not from the instantaneous target distribution. Lesson (confirmed by trial 66, which reproduced the degradation at 25-34 too): **how a
+fast-band policy was grown matters more than any span it is currently sampling — and
+further training at the fast bands, at every span tried, makes them worse.** The fast-band
+champions are checkpoints to preserve, not lineages to continue.
+
+## ★ 2026-08-05 — the safety column nobody was watching, and a fix with no retraining
+Acceptance testing found every band champion recovers from upsets far worse than the old
+full-envelope generalist. The campaign had optimised *nominal precision* for 60+ trials and
+never gated on recovery, so the regression accumulated invisibly.
+
+**Cause: state coverage, not curriculum.** The generalist has `tough_init=0.0` — it never
+trained on failure states at all. Its robustness is breadth of experience alone. Confirming
+this from the other side, reintroducing failure-state training on the mid champion moved
+recovery 12% → 22% but walked precision 0.82 → 0.89 → 0.97, straight onto the 1 m/s goal
+line. Dose works at a bad exchange rate. (Earlier note "dose refuted" was premature — filed
+after one rung of a two-rung ladder; corrected in trial 69.)
+
+**Fix: route, don't retrain.** A supervisory switch hands control to the generalist while the
+aircraft is upset and back to the champion once settled — a routing rule over two trained
+networks, so the pure-RL constraint holds. Final: pooled recovery **22% [17–28] → 46% [40–53]**,
+median post-upset error 38.8 → 9.8 m/s, engaging on **4%** of nominal flights.
+
+**Reporting lesson (advisor caught this).** I first called the precision cost "unchanged to two
+decimals", which was true of the median and *guaranteed* to be — at a 4% engagement rate a
+median over 400 episodes cannot move. p90 can, and did (in both directions, depending on whether
+the seeds were the ones the detector was calibrated on: this is why selection is now out of
+sample). The statistic that actually answers the question is a **paired** one: join armed and
+disarmed runs on (band, seed), which the deterministic harness permits — 379 of 400 episodes
+come out byte-identical, and on the 16 real engagements mean error goes 21.18 → 15.36, helping 9
+and hurting 7 with improvements outweighing regressions 7.4:1. **Net beneficial with real
+per-episode variance** — not "no cost". Never report a rare-event effect through a median.
+
+Two methodological lessons, both from my own errors:
+1. **A detector tuned on one band is not a detector.** Hand-set thresholds looked fine on the
+   mid band (18% spurious) and fired on **47%** of nominal flights across the roster. A
+   tailsitter's cruise is near-horizontal (nominal tilt p95 reaches 110°), so an absolute tilt
+   limit flags ordinary fast flight; and these policies routinely exceed a 2.5 rad/s rate
+   limit. Comparing tilt to the **trim attitude the command implies**, plus dwell, cut
+   spurious firing 16× to 3%. Calibrate against recorded nominal AND failure data, per band.
+2. **Sharing one env between two policies leaks state.** `apply_cfg()` mutated `MAX_SPEED`
+   for obs scaling, but the env samples the *command* from that same attribute at reset — so
+   each episode inherited the previous episode's policy scaling, silently commanding the mid
+   champion up to 25 m/s in an 18 m/s test. Fixed by resetting the band range explicitly.
+
+**Arming is envelope-gated**: the generalist trained to 25 m/s, and arming it above that made
+recovery *worse* (28% → 5% on the 25–34 band). The same state-coverage principle in reverse —
+a policy is robust inside its envelope and unreliable outside it.
+
+## ★ 2026-08-05 (late) — why ONE policy never worked: the reward was numerically dead at speed
+Asked to find a way to train a single policy over 0–50 m/s, I read the reward instead of
+proposing another architecture. All three velocity terms have **absolute** widths (2 m/s,
+5 m/s coverage, 0.5 m/s precision peak). An episode starts at rest, so commanded V means
+initial error d = V, and the shaped reward there is:
+
+| V | 5 | 18 | 25 | 34 | 50 |
+|---|---|---|---|---|---|
+| shaped gradient at rest | 1.3e-1 | 1.1e-3 | 3.7e-6 | 1.2e-10 | **3.9e-22** |
+
+**21 orders of magnitude.** Beyond ~14 m/s of error the only surviving signal is a linear ramp
+with no shape — and its coefficient is `0.4/MAX_SPEED`, so a 0–50 policy gets a **5× weaker**
+far-field pull than a 0–10 specialist (0.0080 vs 0.0400) while the control-effort penalties it
+competes with (≈2e-3) do not shrink. **Asking for a wider envelope mechanically weakens the one
+term that still functions there.**
+
+This retro-explains most of the campaign's shape, which is why it is worth recording even
+untested:
+- **trim-init was the biggest gain at speed** (27) because it starts episodes *inside* the only
+  region where shaped reward exists — a workaround for a dead reward, not a curriculum insight.
+- **fresh fast-band training is a dead end** (54); **further fast-band training always hurt**
+  (62–66) because the dominant remaining gradient is the smoothness penalty → do less → the
+  "loitering equilibrium" of trials 11–12.
+- **precision WEIGHT changed nothing** (31, 0.7→1.5): scaling a 1e-22 term leaves it 1e-22.
+- **banding worked partly by accident** — cutting MAX_SPEED restored the reward slope.
+
+Fix implemented (`rel_approach`): approach terms become scale-invariant (basin width and linear
+pull ∝ commanded speed, reproducing exactly what a specialist at that speed felt), while every
+**goal** term stays absolute — a relative goal would pay full reward for ±25 m/s at 50 m/s.
+Far-field gradient improves 2.4–5.9× with near-field shape unchanged; legacy is bit-identical at
+`rel_approach=0`.
+
+**NOT TRAINED** — user directive to stop starting runs. So this is a quantified mechanism and a
+working implementation, not a result. Lesson worth keeping regardless: *before blaming capacity,
+memory, or interference for a wide-range RL failure, evaluate the reward numerically at the
+edges of the range.* Six trials tested architecture; none had checked whether the objective was
+still finite out there.

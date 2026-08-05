@@ -79,3 +79,16 @@ needed 20–30 s to settle here). xw38c re-eval @20 s running; if the median dro
 substantially, the next arm is LONGER EPISODES at high band — newly viable because the
 user's yaw spec (yaw free at speed) voids the yaw-collapse objection that killed long
 episodes in trials 22/25.
+
+## Exact code changes
+No code changes — flags only on the existing implementation (the feature's code is in the trial cited below).
+(integral-tau flag: trial 22.)
+```bash
+# only this differs from trial 38:
+  --integral-tau 10        # leaky integral memory 3 s -> 10 s
+```
+```python
+# rate_vel_aviary.py — the dynamics being changed (unchanged code, quoted for reference):
+        self.vel_integral = (self.vel_integral * np.exp(-dt / self.INTEGRAL_TAU)
+                             + vel_err * dt)      # clamped to +-MAX_SPEED
+```

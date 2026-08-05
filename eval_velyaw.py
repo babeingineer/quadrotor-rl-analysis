@@ -29,8 +29,9 @@ class _Predictor:
         return self.m.predict(obs, deterministic=deterministic)
 
 
-def load(D, ep_len=10.0, **overrides):
-    cfg = json.load(open(f"{D}/config.json"))
+def env_kwargs(cfg, ep_len=10.0, **overrides):
+    """Env kwargs implied by a saved config. Shared with recovery_switch.py so a policy is
+    always rebuilt with the interface/scaling it was trained on."""
     kw = dict(episode_len_sec=ep_len, max_speed=cfg.get("max_speed", 25.0),
               speed_min=cfg.get("speed_min", 0.0),
               wind_max=cfg.get("wind_max", 20.0),
@@ -45,12 +46,21 @@ def load(D, ep_len=10.0, **overrides):
               yaw_gate=cfg.get("yaw_gate", False),
               yaw_gate_floor=cfg.get("yaw_gate_floor", 0.2),
               vel_precision=cfg.get("vel_precision", 0.0),
+              rel_approach=cfg.get("rel_approach", 0.0),
+              rel_width=cfg.get("rel_width", 0.5),
+              rel_floor=cfg.get("rel_floor", 8.0),
               yaw_att_gate=cfg.get("yaw_att_gate", False),
               cov_width=cfg.get("cov_width", 0.0),
               aero_dr=cfg.get("aero_dr", True),
               integral_tau=cfg.get("integral_tau", 3.0),
+              yaw_integral_tau=cfg.get("yaw_integral_tau", None),
               priv_obs=cfg.get("priv_critic", False),
               att_cmd=cfg.get("att_cmd", False), katt=cfg.get("katt", 1.5),
+              att_rel=cfg.get("att_rel", False), att_rel_k=cfg.get("att_rel_k", 0.5),
+              trim_ff=cfg.get("trim_ff", False), trim_ff_k=cfg.get("trim_ff_k", 0.4),
+              trim_ff_thrust=cfg.get("trim_ff_thrust", 0.4),
+              trim_ff_fin=cfg.get("trim_ff_fin", 0.5),
+              trim_ff_true_wind=cfg.get("trim_ff_true_wind", True),
               ctrl_freq=cfg.get("ctrl_freq", 50),
               fin_assist=cfg.get("fin_assist", 0.0),
               air_obs=cfg.get("air_obs", False),
@@ -58,6 +68,12 @@ def load(D, ep_len=10.0, **overrides):
               ki_rate=tuple(float(x) for x in cfg.get("ki_rate", "0.5,0.5,0.3").split(",")),
               randomize_init=False)
     kw.update(overrides)
+    return kw
+
+
+def load(D, ep_len=10.0, **overrides):
+    cfg = json.load(open(f"{D}/config.json"))
+    kw = env_kwargs(cfg, ep_len, **overrides)
     venv = DummyVecEnv([lambda: RateVelAviary(**kw)])
     venv = VecNormalize.load(f"{D}/vecnormalize.pkl", venv)
     venv.training = False; venv.norm_reward = False

@@ -154,3 +154,22 @@ wind bins: [0-5) n=23 med 0.82 <1: 65%  [5-10) n=42 med 1.40 <1: 40%  [10-15) n=
   1.39 [1.14–1.62] — **NULL**. Low-LR convergence does not break the plateau; the
   rate-interface lineage is closed at ~1.35–1.4 median. The att-cmd lineage (xw32e)
   carries the <1 push; xw34 (dose 0.4) auto-launched on this chain.
+
+## Exact code changes
+No env/trainer code change. The trial's artifact is the auto-deciding ladder script
+(`ladder_xw27.sh`), whose gate became the campaign standard:
+```bash
+# The robust gate used by every ladder from trial 33 on (replaces point-estimate gates
+# after checkpoint-lottery inflation was found): n=300 + 200-sample bootstrap CI.
+  MED=$("$PY" -c "
+from eval_velyaw import evaluate
+import numpy as np
+rows = evaluate('$OUT', n=300, ep_len=8.0)
+e = np.array([r[1] for r in rows if not r[3]])
+b = [np.median(np.random.default_rng(i).choice(e, len(e))) for i in range(200)]
+import sys
+print(f'{np.median(e):.2f}')
+print(f'[CI {np.percentile(b,2.5):.2f}-{np.percentile(b,97.5):.2f}] <1: {np.mean(e<1)*100:.0f}%', file=sys.stderr)" 2>>${OUT}_robust.log | tail -1)
+  STOP=$("$PY" -c "print(1 if float('$MED') > float('$PREV')*0.93 else 0)")   # <7% -> stop
+```
+Each stage: `continue_train.py --src <prev> --out <next> --extra 8000000 --lr 1e-4`.

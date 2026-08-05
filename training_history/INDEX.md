@@ -1,7 +1,9 @@
 # Training history — velocity + heading (velyaw) task
 
-**Quick read: [JOURNEY.md](JOURNEY.md)** — concise summary of the 81.7 → 5.26 m/s arc:
+**Quick read: [JOURNEY.md](JOURNEY.md)** — concise summary of the 81.7 → 0.44 m/s arc:
 what failed, what succeeded, and the recurring failure mode.
+**Negative results: [ELIMINATED.md](ELIMINATED.md)** — every mechanism tested and refuted, with
+numbers, so nothing gets re-tested. Read it before proposing anything.
 **Master plan: [ULTIMATE_PLAN.md](ULTIMATE_PLAN.md)** — 2026-07-31 full-record diagnosis
 (4 root causes, adversarially verified) + the staged redesign to <1 m/s.
 
@@ -35,6 +37,7 @@ physical metrics, behavior traces), and the analysis/verdict.
 | 24 | [24_xw24_highband_corrected.md](24_xw24_highband_corrected.md) | `results_velyaw_xw24(b)` | **LOOP**: HIGH band, corrected recipe @ γ 0.997 | **ABORTED pre-verdict** — recipe went 0-for-2 (trials 22/23); redesign waits for the isolation verdicts |
 | 25 | [25_xw25_lowband_isolation.md](25_xw25_lowband_isolation.md) | `results_velyaw_xw25(b)` | **ISOLATION**: xw18b + ONLY true integrator + 20 s (γ 0.99, default gains) | **vel 0.93 med ≈ xw18b (pair EXONERATED on velocity) but yaw 90° at γ0.99** → γ never the yaw driver; E4 dead; standing recipe = leaky τ3 / 8 s / γ0.99 |
 | 27 | [27_xw27_trim_init.md](27_xw27_trim_init.md) | `results_velyaw_xw27(b)` | **E1**: mid band + trim-init 0.2 (goal-state exposure; ONE change vs xw26) — inflight-hold discriminator proved the hold skill is missing | **BIGGEST SINGLE-CHANGE MID GAIN: 4.09 / median 3.44 / yaw 14.5°** (was 6.33/4.44/52°); hold 3.27 from trim → hold quality is the whole residual |
+| 59 | [59_composite_system.md](59_composite_system.md) | `eval_composite.py` | **COMPOSITE**: 4 band champions routed by commanded speed — first envelope-wide number | **pooled 0–34 m/s: median 1.33 [1.11–1.71], 43%<1, 0 crashes** (bands 0.49 / 0.74 / 1.81 / 3.77) |
 | 33 | [33_xw27_budget_ladder.md](33_xw27_budget_ladder.md) | `results_velyaw_xw27c/d` | **K4a auto-ladder** on xw27b: +8M stages while median improves >7% | 20M: 2.61 → 28M: 1.72 → 36M: **median 1.29** (−25%, still climbing) → 44M running |
 | 32 | [32_xw32_att_cmd.md](32_xw32_att_cmd.md) | `results_velyaw_xw32(b)` | **ATT-CMD**: attitude-setpoint interface (structural trim stabilization) + trim-init | ★ CLOSED @36M: **ROBUST median 0.92 [0.85–1.04], 53%<1 — first sub-1 band** (44M stage flat → self-stopped); tail arm queued for the ≥85% bar |
 | 31 | [31_xw31_precision_reshape.md](31_xw31_precision_reshape.md) | `results_velyaw_xw31(b)` | **ARM B**: precision weight 0.7→1.5 (incentive hypothesis; vs xw27) | **FLAT: 3.67 med** ≈ xw27 — incentive refuted |
@@ -45,6 +48,21 @@ physical metrics, behavior traces), and the analysis/verdict.
 | 20 | [20_xw21_no_aero_dr.md](20_xw21_no_aero_dr.md) | `results_velyaw_xw21(b)` | **ABLATION (user)**: aero DR OFF, high band | **11.40** — WORSE than with DR (8.94): identification REFUTED as the bottleneck; DR even regularizes |
 | 19 | [19_xw20_stiff_inner_loop.md](19_xw20_stiff_inner_loop.md) | `results_velyaw_xw20(b)` | **LOOP iter 12**: stiff inner loop (kp 40/ki 10), high band | **8.94** — ripple real (~1 m/s) but not dominant; identification term now prime suspect → LSTM decides |
 | 16 | [16_xw18b_floor.md](16_xw18b_floor.md) | `results_velyaw_xw18b` | **LOOP iter 10**: converge the specialist | **MILESTONE**: hover 0.78 ✓; low-band 1.89 mean / **0.82 median**, 59% of eps < 1 under FULL spec — floor = wind tail, not training |
+| 54 | [54_xw54_high_refined_trim.md](54_xw54_high_refined_trim.md) | `results_velyaw_xw54` | FRESH 18–25 + refined trim-init (dose 0.3) | **FAILURE: 5.07 median @12M** vs the transfer champion's 2.03 — decisive negative about **LINEAGE**: transfer reached 2.39 in ONE 6M continuation |
+| 55 | [55_xw55_vhigh_ladder.md](55_xw55_vhigh_ladder.md) | `results_velyaw_xw55a` | VHIGH 25–34 budget ladder (trained 21–34) | **3.77 band median** — the vhigh champion; earlier "flyability gate failed" verdicts at 21–34/21–35 were **undertraining, not infeasibility** |
+| 56 | [56_xw56_split_integral.md](56_xw56_split_integral.md) | `results_velyaw_xw56` | split integral leak (yaw τ decoupled), fresh 18–25 | **INCONCLUSIVE by my design error** — launched on a fresh lineage immediately after trial 54 closed fresh training; rerun as trial 61 |
+| 57 | [57_xw57_champion_refined.md](57_xw57_champion_refined.md) | `results_velyaw_xw57` | champion + refined (per-episode) trim-init | **FAILURE: 2.50** vs 2.03 — with trials 54 + 28, **trim-init is fully exhausted** at 18–25 |
+| 58 | [58_xw58_envelope_climb.md](58_xw58_envelope_climb.md) | `results_velyaw_xw58` | envelope climb 24→37 m/s toward the 45 goal | stage a top band (33–37) median **6.95**, under the 7.0 coverage gate — climb stalled; **34–45 m/s remains uncovered** |
+| 61 | [61_xw61_champion_split_integral.md](61_xw61_champion_split_integral.md) | `results_velyaw_xw61` | split integral on the CHAMPION (proper rerun of 56) | **FAILURE: 3.09 → 2.72 [CI 2.25–3.07]** vs 2.03, CIs disjoint after 16M of re-adaptation — the **true-integrator question is CLOSED** |
+| 62 | [62_xw62_vhigh_precision.md](62_xw62_vhigh_precision.md) | `results_velyaw_xw62` | precision stack transferred to 25–34 | superseded by the step-matched rerun (trial 63) |
+| 63 | [63_xw63_vhigh_precision_matched.md](63_xw63_vhigh_precision_matched.md) | `results_velyaw_xw63` | same, step-matched vs xw55a | **FAILURE: 5.06 [CI 4.28–6.45]** vs 3.77 — narrowing the span to 25–34 degrades the band |
+| 64 | [64_xw64_high_pure_ladder.md](64_xw64_high_pure_ladder.md) | `results_velyaw_xw64` | patient low-LR ladder at 18–25 | **NULL: 2.10** vs 2.03 — the band is **not step-size limited**; ladder self-stopped after one stage |
+| 65 | [65_xw65_scaffold_width.md](65_xw65_scaffold_width.md) | `results_velyaw_xw65` | scaffold width rule at 18–25 (train 14–25) | **FAILURE: 2.48 [CI 2.08–2.88]** vs 2.03 — the width rule does **NOT** transfer down |
+| 66 | [66_xw66_scaffold_width_vhigh.md](66_xw66_scaffold_width_vhigh.md) | `results_velyaw_xw66` | scaffold width at 25–34 (train 20–34) | **FAILURE: 5.06 [CI 4.25–6.02]** vs 3.77 — width rule refuted in **both** directions; the champion's edge is **LINEAGE**, and further training at fast bands always hurt |
+| 67 | [67_xw67_trim_feedforward.md](67_xw67_trim_feedforward.md) | `rate_vel_aviary.py` (`trim_ff`) | trim feedforward (residual-style assist) | **CANCELLED BY USER** — *"i don't need trim. i need only pure RL."* Code implemented but left default **OFF** |
+| 68 | [68_xw68_trim_ff_deployable.md](68_xw68_trim_ff_deployable.md) | — | deployable (wind-estimate) trim FF | **CANCELLED** before any verdict — same decision |
+| 69 | [69_xw69_recovery_curriculum.md](69_xw69_recovery_curriculum.md) | `results_velyaw_xw69_010/020`, `recovery_switch.py` | **RECOVERY**: failure-state dose ladder, then a supervisory switch | dose is weak and costly (recovery 12→22%, precision 0.82→**0.97**); **routing wins: pooled recovery 22% [17–28] → 46% [CI 40–53]**, post-upset median error 38.8→9.8, engaging on 4% of flights and **net positive on precision** (paired same-seed: 21.18→15.36 mean on engaged episodes, 7.4:1 benefit:harm). Detector recalibrated after firing on 47% of normal flights; "no precision cost" was a median-only artifact, corrected |
+| 70 | [70_reward_scale_invariance.md](70_reward_scale_invariance.md) | `rate_vel_aviary.py` (`rel_approach`) | **ROOT CAUSE of the wide-range failure**: reward has absolute widths, so shaped gradient at rest falls 1.3e-1 (5 m/s) → **3.9e-22 (50 m/s)**, and the surviving linear pull is scaled `0.4/MAX_SPEED` so widening the envelope weakens it 5×. Explains trim-init's gain, fresh-band failure, fast-band degradation, and trial 31's null. Scale-invariant approach basin + speed-keyed linear pull implemented (absolute GOAL terms untouched) | **ANALYSIS + CODE ONLY — NOT TRAINED** (user directive: no new training) |
 
 ## Conventions
 - Physical eval = `eval_velyaw.py`: 120 episodes, level start, steady-state error over the
@@ -70,3 +88,9 @@ Yaw is commanded and scored at **hover/low speed only**; in fast flight the nose
 the velocity vector and yaw is free (the attitude gate implements exactly this). Yaw
 columns for mid/high/vhigh/top rows are informational. The deep-research report's
 course-aware heading redesign is NOT adopted — unnecessary under this spec.
+
+## Convention reminder (enforced 2026-08-04)
+Every trial MD carries an **## Exact code changes** section with the edited code verbatim
+(marked NEW/CHANGED per file), or an explicit "no code changes — flags only" pointing at
+the trial where that feature's code lives. Trials 31–55 were backfilled after the
+autonomous phase let this slip.

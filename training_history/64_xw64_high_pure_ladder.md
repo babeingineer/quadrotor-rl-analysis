@@ -1,24 +1,54 @@
-# Trial 51 — xw51: high-band polish ladder (coverage→polish phase)
+# Trial 64 — xw64: high-band pure ladder at lower LR (no mechanism changes)
 
 ## Why
-Staircase v2 covers the envelope; per-band precision needs dedicated polish (xw49b showed
-trailing bands hold but don't mature). From xw45b (18–25: 2.39 med, 21%<1), the proven
-polish stack: dedicated range + oversample 0.5 + robust-gated +8M stages.
-Target: median <1 (the low/mid precedent: 0.88→0.46, 2.35→0.82 via this exact stack).
-Fallback on stall >1: teacher–student from the classical cascade (user-briefed).
+Every mechanism arm at 18–25 is now exhausted (authority, band split, airflow obs, 100 Hz,
+integral memory ×2, trim refinement, fresh training, teacher–student). What has NOT been
+tried on this band is the plainest thing: more low-LR stages on the champion with the
+range matched and nothing else changed. Two supporting facts:
+- Trial 51's polish used lr 1e-4 and regressed on its third stage (2.03 → 2.50), a classic
+  too-large-step symptom at a late plateau; the mid band's final gains came from patient
+  stages, and its very last useful stage was small.
+- Trial 62 showed range mismatch alone costs ~1.5 m/s at these speeds, so the source must
+  be range-matched (18–25) — trial 51's source was the 12–25 extension.
+
+`--lr 3e-5` (a third of trial 51's), range matched to 18–25, oversample 0.5, gate tightened
+to 5% improvement.
+
+## Exact code changes
+None — flags only (band overrides: trial 45; oversampling: 35; robust gate: 33).
+
+## Pre-registered (vs champion 2.03, 23% <1)
+- SUCCESS: median <1.7 → the band was step-size limited, not mechanism limited.
+- NULL: 1.9–2.1 → 2.03 is this architecture's honest limit at 18–25 under full DR + wind;
+  escalate the architectural decision (trim feedforward) to the user.
+- FAILURE: >2.2 → same conclusion, reached sooner.
+
+## Result
+*(auto-appended)*
+
+## VERDICT: NULL — 2.10 [see robust log] vs champion 2.03, pct 23 unchanged. Patient low-LR
+stages neither help nor hurt: the band is NOT step-size limited. Ladder self-stopped after
+one stage.
+
+**With this, the 18–25 band has exhausted every mechanism the campaign can construct:**
+authority tuning (38/40), band split (42), airflow observability (41), control rate (36/39),
+integral memory (44/56/61), trim-init dose and refinement (28/54/57), fresh vs transfer
+lineage (54), teacher–student (closed by measurement), wind oversampling (43/51), budget
+ladders at three learning rates (51/64), and coverage-width variants (62/63/65 pending).
+**Honest limit for this architecture at 18–25 under full DR + wind 0–15: median ≈ 2.0.**
 
 ---
 
-## AUTO-CAPTURED RESULTS (2026-08-04 00:38)
+## AUTO-CAPTURED RESULTS (2026-08-05 04:12)
 
 **config**: `{"max_speed": 25.0, "speed_min": 18.0, "wind_max": 15.0, "use_integral": true, "use_yaw_integral": true, "use_wind_est": true, "yaw_width": 0.35, "yaw_weight": 1.0, "yaw_bias": 0.3, "heading_frame": false, "xwing_aero": true, "tough_init": 0.0, "wind_curriculum": false, "yaw_gate": true, "yaw_gate_floor": 0.2, "vel_precision": 0.7, "trim_init": 0.2, "priv_critic": false, "att_cmd": true, "katt": 1.5, "yaw_att_gate": true, "cov_width": 5.0, "kp_rate": "25,25,15", "ki_rate": "6,6,3", "aero_dr": true, "integral_tau": 3.0, "ent_coef": 0.003, "gamma": 0.99, "episode_len": 8.0, "wind_oversample": 0.5}`
 
-**eval curve**: n=160, first 929, best 1024 @ 70,010,766, last 618 (final steps 74,060,604)
+**eval curve**: n=160, first 620, best 893 @ 84,684,372, last 552 (final steps 90,084,156)
 
-**late trend**: DECLINING (last-10% mean 678 vs prior-10% 685)
+**late trend**: DECLINING (last-10% mean 551 vs prior-10% 557)
 
 
-![training curve](figs/velyaw_xw51a_curve.png)
+![training curve](figs/velyaw_xw64a_curve.png)
 
 
 ### Physical eval
@@ -27,46 +57,44 @@ Fallback on stall >1: teacher–student from the classical cascade (user-briefed
 
 band           n    mean  median   %<1     p90     yaw
 --------------------------------------------------------
-high(18-25)  100    6.12    1.86   29%   14.06   18.8°
+high(18-25)  100    6.25    1.85   28%   20.36   22.6°
 --------------------------------------------------------
-ALL          100    6.12    1.86   29%   14.06   18.8°   crash 0.0%
-wind bins: [0-5) n=23 med 1.03 <1: 48%  [5-10) n=42 med 1.85 <1: 24%  [10-15) n=35 med 2.71 <1: 23%
+ALL          100    6.25    1.85   28%   20.36   22.6°   crash 0.0%
+wind bins: [0-5) n=23 med 1.38 <1: 39%  [5-10) n=42 med 1.55 <1: 29%  [10-15) n=35 med 2.72 <1: 20%
 ```
 
 
 ### Dive-recovery test
 ```
 === DIVE-RECOVERY TEST (60 episodes, all starting in failure states) ===
-  recovered (final-2s vel err < 8 m/s):  9/60 = 15%
-  partial   (8-15 m/s):                  4/60 = 7%
-  median final err: 37.0 m/s   mean: 36.7 m/s
+  recovered (final-2s vel err < 8 m/s):  7/60 = 12%
+  partial   (8-15 m/s):                  3/60 = 5%
+  median final err: 34.8 m/s   mean: 35.3 m/s
 ```
 
 
 ### Behavior traces
 ```
 --- trace seed 1005: target [19.8  8.7  0.4] (|v|=21.6), wind [ -3.6 -11.6  -3.1] ---
-  t= 0.0 |v|=  0.1 vz=   0.0 tilt=   0 verr= 21.7 yawerr=+103.5 fins=( +1.7,-10.5) thr=+0.38
-  t= 2.0 |v|= 17.6 vz=  -5.7 tilt=  91 verr=  9.1 yawerr= +60.8 fins=(+18.4,-10.9) thr=+1.00
-  t= 4.0 |v|= 22.2 vz=   5.0 tilt=  23 verr=  6.0 yawerr=  -7.4 fins=(+18.5,-20.0) thr=-1.00
-  t= 6.0 |v|= 17.3 vz=   6.7 tilt=  37 verr=  8.5 yawerr= -11.2 fins=(+18.5,+20.0) thr=-1.00
+  t= 0.0 |v|=  0.1 vz=   0.0 tilt=   0 verr= 21.7 yawerr=+103.5 fins=( -4.5,-10.5) thr=+0.81
+  t= 2.0 |v|= 15.7 vz=   0.0 tilt=  55 verr=  6.4 yawerr= +40.0 fins=(+18.5, -5.1) thr=-1.00
+  t= 4.0 |v|= 18.8 vz=  -0.7 tilt=  56 verr=  3.1 yawerr=  -9.9 fins=(+18.5,+19.7) thr=-1.00
+  t= 6.0 |v|= 19.3 vz=   2.0 tilt=  59 verr=  2.9 yawerr=  +6.8 fins=(+18.5,+16.2) thr=-1.00
 --- trace seed 1012: target [  8.1 -21.4   1.8] (|v|=23.0), wind [-0.3  4.1 -6.1] ---
-  t= 0.0 |v|=  0.0 vz=   0.0 tilt=   0 verr= 23.0 yawerr= +46.7 fins=( +2.2, -8.9) thr=+1.00
-  t= 2.0 |v|= 20.0 vz=   0.7 tilt=  62 verr=  3.1 yawerr=  +6.0 fins=(-20.0,-18.2) thr=+0.16
-  t= 4.0 |v|= 22.3 vz=   0.1 tilt=  58 verr=  1.9 yawerr=  +8.8 fins=(-15.1,-18.2) thr=-0.20
-  t= 6.0 |v|= 22.3 vz=   0.1 tilt=  57 verr=  1.9 yawerr=  +8.9 fins=(-14.9,-18.2) thr=-0.20
+  t= 0.0 |v|=  0.0 vz=   0.0 tilt=   0 verr= 23.0 yawerr= +46.7 fins=( +5.1, -8.9) thr=+1.00
+  t= 2.0 |v|= 21.0 vz=   2.1 tilt=  59 verr=  2.0 yawerr=  +8.7 fins=(-19.0,-18.2) thr=-0.49
+  t= 4.0 |v|= 22.7 vz=   1.4 tilt=  56 verr=  0.6 yawerr=  -0.8 fins=( -7.6,-18.2) thr=-0.49
+  t= 6.0 |v|= 22.2 vz=   0.6 tilt=  57 verr=  1.4 yawerr=  +3.2 fins=(-12.3,-18.2) thr=-0.22
 --- trace seed 1020: target [-14.7  16.5   1.4] (|v|=22.1), wind [-0.3 -1.2 -0.6] ---
-  t= 0.0 |v|=  0.0 vz=   0.0 tilt=   0 verr= 22.1 yawerr= -65.7 fins=(+10.6, +9.7) thr=-0.76
-  t= 2.0 |v|= 14.6 vz=   0.6 tilt=  66 verr=  7.6 yawerr= +26.5 fins=( +3.4,-20.0) thr=-0.05
-  t= 4.0 |v|= 19.7 vz=   1.8 tilt=  47 verr=  2.5 yawerr=  +3.1 fins=( -8.6,-20.0) thr=-0.82
-  t= 6.0 |v|= 19.5 vz=   3.0 tilt=  44 verr=  3.4 yawerr=  +4.2 fins=(+20.0,-20.0) thr=-1.00
+  t= 0.0 |v|=  0.0 vz=   0.0 tilt=   0 verr= 22.1 yawerr= -65.7 fins=(+10.6, +8.9) thr=-0.46
+  t= 2.0 |v|= 14.3 vz=   1.7 tilt=  70 verr=  8.0 yawerr= +13.4 fins=( +5.2,-20.0) thr=+0.18
+  t= 4.0 |v|= 20.0 vz=   2.3 tilt=  47 verr=  2.7 yawerr=  +5.7 fins=(+20.0,-20.0) thr=-1.00
+  t= 6.0 |v|= 20.1 vz=   3.2 tilt=  51 verr=  2.9 yawerr=  -3.3 fins=(+12.8,-20.0) thr=-1.00
 ```
-- Stage a: median 2.40 (flat), **%<1 21→26** — gate passed on the tail criterion;
-  stage b continuing (mid-band precedent: %<1 moves first, median follows).
 
 ---
 
-## AUTO-CAPTURED RESULTS (2026-08-04 06:55)
+## AUTO-CAPTURED RESULTS (2026-08-05 04:14)
 
 **config**: `{"max_speed": 25.0, "speed_min": 18.0, "wind_max": 15.0, "use_integral": true, "use_yaw_integral": true, "use_wind_est": true, "yaw_width": 0.35, "yaw_weight": 1.0, "yaw_bias": 0.3, "heading_frame": false, "xwing_aero": true, "tough_init": 0.0, "wind_curriculum": false, "yaw_gate": true, "yaw_gate_floor": 0.2, "vel_precision": 0.7, "trim_init": 0.2, "priv_critic": false, "att_cmd": true, "katt": 1.5, "yaw_att_gate": true, "cov_width": 5.0, "kp_rate": "25,25,15", "ki_rate": "6,6,3", "aero_dr": true, "integral_tau": 3.0, "ent_coef": 0.003, "gamma": 0.99, "episode_len": 8.0, "wind_oversample": 0.5}`
 
@@ -117,16 +145,4 @@ wind bins: [0-5) n=23 med 1.36 <1: 30%  [5-10) n=42 med 1.70 <1: 29%  [10-15) n=
   t= 2.0 |v|= 14.0 vz=   1.5 tilt=  69 verr=  8.3 yawerr= +18.9 fins=( +0.4,-20.0) thr=+0.13
   t= 4.0 |v|= 19.2 vz=   1.7 tilt=  51 verr=  3.1 yawerr=  -2.0 fins=(+20.0,-20.0) thr=-0.81
   t= 6.0 |v|= 19.8 vz=   2.9 tilt=  52 verr=  2.9 yawerr=  -5.3 fins=(+14.4,-20.0) thr=-0.86
-```
-- Stage b: **median 2.03** (−15%) pct 23 — best high-band result of the campaign.
-- Stage c: 2.50 (regression) → ladder STOPPED. **HIGH-BAND CHAMPION: xw51b, median 2.03.**
-  (For reference, the classical cascade gets 3.90 here — RL now beats the hand-tuned
-  controller at the high band.)
-
-## Exact code changes
-No code changes — flags only on the existing implementation (the feature's code is in the trial cited below).
-(all mechanisms from trials 27/32/35/38/45.) Polish-ladder gate accepts EITHER a median
-improvement or a tail improvement:
-```bash
-  OK=$("$PY" -c "print(1 if float('$MED') <= float('$PREVMED')*0.93 or float('$PCT') >= float('$PREVP')+5 else 0)")
 ```

@@ -139,3 +139,28 @@ wind bins: [0-5) n=23 med 2.04 <1: 0%  [5-10) n=42 med 2.76 <1: 2%  [10-15) n=35
   t= 4.0 |v|= 13.5 vz=   1.7 tilt=  28 verr=  1.8 yawerr=  -1.3 fins=(-15.3,-20.0) thr=-0.17
   t= 6.0 |v|= 13.0 vz=   1.2 tilt=  29 verr=  2.0 yawerr=  -1.7 fins=(-17.0,-20.0) thr=-0.17
 ```
+
+## Exact code changes
+```python
+# rate_vel_aviary.py — constructor arg (NEW):
+                 air_obs: bool = False,            # DIAGNOSTIC: actor sees true body-frame
+                 #                                   air-relative velocity (3 dims); deployment
+                 #                                   would need an observer for this
+
+# rate_vel_aviary.py — __init__ (NEW):
+        self.AIR_OBS = bool(air_obs)
+
+# rate_vel_aviary.py — _observationSpace() (ADDED before the privileged tail):
+        if self.AIR_OBS:
+            dim += 3
+
+# rate_vel_aviary.py — _computeObs() (ADDED after the yaw integral):
+        if self.AIR_OBS:                                       # 3  <- true body-frame airflow
+            parts.append((R.T @ (self.vel[0] - self.wind)) / self.MAX_SPEED)
+
+# train.py — flag (NEW):
+    ap.add_argument("--air-obs", action="store_true",
+                    help="DIAGNOSTIC: actor observes true body-frame air-relative velocity "
+                         "(3 dims); tests whether the strong-wind tail is an observability gap")
+# config key "air_obs"; eval/continue pass air_obs=cfg.get("air_obs", False)
+```

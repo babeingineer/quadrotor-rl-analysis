@@ -47,6 +47,14 @@ def main():
     ap.add_argument("--wind-oversample", type=float, default=None,
                     help="set/override strong-wind episode oversampling for this continuation "
                          "(training-distribution change: safe on continuation)")
+    ap.add_argument("--tough-init-override", type=float, default=None,
+                    help="set/override the failure-state (upset) init fraction for this "
+                         "continuation — recovery curriculum without touching the recipe")
+    ap.add_argument("--integral-tau-override", type=float, default=None,
+                    help="change the velocity-integral leak for this continuation (obs "
+                         "DYNAMICS change: values shift meaning, so expect re-adaptation)")
+    ap.add_argument("--yaw-integral-tau-override", type=float, default=None,
+                    help="change the yaw-integral leak for this continuation")
     ap.add_argument("--max-speed-override", type=float, default=None,
                     help="widen the target-speed envelope for this continuation (band-extension "
                          "transfer); obs scaling uses the same MAX_SPEED so update config too")
@@ -75,12 +83,21 @@ def main():
                        yaw_gate=cfg.get("yaw_gate", False),
                        yaw_gate_floor=cfg.get("yaw_gate_floor", 0.2),
                        vel_precision=cfg.get("vel_precision", 0.0),
+                       rel_approach=cfg.get("rel_approach", 0.0),
+                       rel_width=cfg.get("rel_width", 0.5),
+                       rel_floor=cfg.get("rel_floor", 8.0),
                        yaw_att_gate=cfg.get("yaw_att_gate", False),
                        cov_width=cfg.get("cov_width", 0.0),
                        aero_dr=cfg.get("aero_dr", True),
                        integral_tau=cfg.get("integral_tau", 3.0),
+                       yaw_integral_tau=cfg.get("yaw_integral_tau", None),
                        priv_obs=cfg.get("priv_critic", False),
                        att_cmd=cfg.get("att_cmd", False), katt=cfg.get("katt", 1.5),
+                       att_rel=cfg.get("att_rel", False), att_rel_k=cfg.get("att_rel_k", 0.5),
+                       trim_ff=cfg.get("trim_ff", False), trim_ff_k=cfg.get("trim_ff_k", 0.4),
+                       trim_ff_thrust=cfg.get("trim_ff_thrust", 0.4),
+                       trim_ff_fin=cfg.get("trim_ff_fin", 0.5),
+                       trim_ff_true_wind=cfg.get("trim_ff_true_wind", True),
                        ctrl_freq=cfg.get("ctrl_freq", 50),
                        fin_assist=cfg.get("fin_assist", 0.0),
                        air_obs=cfg.get("air_obs", False),
@@ -88,6 +105,12 @@ def main():
                        ki_rate=tuple(float(x) for x in cfg.get("ki_rate", "0.5,0.5,0.3").split(",")))
     if args.wind_oversample is not None:
         cfg["wind_oversample"] = args.wind_oversample
+    if args.tough_init_override is not None:
+        cfg["tough_init"] = args.tough_init_override
+    if args.integral_tau_override is not None:
+        cfg["integral_tau"] = args.integral_tau_override
+    if args.yaw_integral_tau_override is not None:
+        cfg["yaw_integral_tau"] = args.yaw_integral_tau_override
     if args.max_speed_override is not None:
         cfg["max_speed"] = args.max_speed_override
     if args.speed_min_override is not None:

@@ -74,3 +74,12 @@ wind bins: [0-5) n=23 med 6.59 <1: 0%  [5-10) n=42 med 7.30 <1: 0%  [10-15) n=35
   t= 4.0 |v|= 18.9 vz=   1.0 tilt=  46 verr=  3.5 yawerr=  +2.1 fins=(-19.6,-17.6) thr=-0.48
   t= 6.0 |v|= 18.4 vz=   1.4 tilt=  42 verr=  3.9 yawerr=  +5.9 fins=(-13.4,-15.4) thr=-0.57
 ```
+
+## Exact code changes
+No code changes — flags only on the existing implementation (the feature's code is in the trial cited below).
+(att-cmd: trial 32; trim-init: trial 27; robust ladder gate: trial 33.)
+```bash
+python train.py --xwing-aero --yaw-bias 0.3 --max-speed 25 --speed-min 18 --wind-max 15 \
+  --yaw-gate --yaw-att-gate --vel-precision 0.7 --cov-width 5 --ent-coef 0.003 \
+  --trim-init 0.2 --att-cmd --n-envs 6 --timesteps 8000000 --out-dir results_velyaw_xw37
+```

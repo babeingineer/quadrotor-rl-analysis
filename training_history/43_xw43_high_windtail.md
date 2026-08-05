@@ -132,3 +132,11 @@ leak caps nullable offset). The policy's integral obs has the same τ=3 leak.
 arm — hold≈rest refutes the approach-deficit theory behind dosing; deviation documented).
 τ=1e6 is NOT used: trials 22/25 showed full integrators collapse yaw when paired with
 long episodes; τ=10 at 8 s episodes is the mid-ground E4 design.
+
+## Exact code changes
+No code changes — flags only on the existing implementation (the feature's code is in the trial cited below).
+(wind oversampling: trial 35.)
+```bash
+python continue_train.py --src results_velyaw_xw38c --out results_velyaw_xw43 \
+  --extra 8000000 --lr 1e-4 --wind-oversample 0.5
+```

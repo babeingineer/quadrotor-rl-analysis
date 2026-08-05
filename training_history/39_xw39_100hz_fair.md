@@ -160,3 +160,21 @@ wind bins: [0-5) n=23 med 2.82 <1: 4%  [5-10) n=42 med 3.90 <1: 0%  [10-15) n=35
   t= 6.0 |v|= 13.1 vz=   2.3 tilt=   7 verr=  2.4 yawerr= +20.2 fins=( +8.9,-20.0) thr=-1.00
   t= 7.0 |v|= 14.1 vz=   3.7 tilt=  44 verr=  3.2 yawerr= +17.9 fins=(-18.9,-16.6) thr=-1.00
 ```
+
+## Exact code changes
+```python
+# train.py — flags (NEW; trial 36 left these in STEP units, which confounded that test):
+    ap.add_argument("--gae-lambda", type=float, default=0.95,
+                    help="GAE lambda; rescale with ctrl rate to keep the same TIME window "
+                         "(50->100 Hz: 0.95 -> 0.975)")
+    ap.add_argument("--n-steps", type=int, default=2048,
+                    help="PPO rollout length per env; double with ctrl rate to span the "
+                         "same seconds")
+
+# train.py — PPO construction (CHANGED from hard-coded 2048 / 0.95):
+        n_steps=args.n_steps, batch_size=4096, n_epochs=10,
+        gamma=args.gamma, gae_lambda=args.gae_lambda, clip_range=0.2,
+```
+
+Run flags: `--ctrl-freq 100 --gamma 0.995 --gae-lambda 0.975 --n-steps 4096`, 16M+8M
+(the same simulated seconds as the 50 Hz twin's 8M+4M).

@@ -58,6 +58,26 @@ class RateVelAviary(BaseAviary):
                  #                                   body-z + yaw rate) -> inner attitude P ->
                  #                                   rate PID
                  katt: float = 1.5,                # attitude-P gain for att_cmd mode
+                 att_rel: bool = False,            # att_cmd variant: the commanded thrust
+                 #                                   direction is BODY-RELATIVE
+                 #                                   (unit[k*ax, k*ay, 1] rotated by R).
+                 #                                   The world-frame form's sensitivity is
+                 #                                   1/sqrt(1-|xy|^2) -> blows up at the high
+                 #                                   tilts trim requires at speed; this form
+                 #                                   has constant conditioning and a neutral
+                 #                                   "hold attitude" action at a=0.
+                 att_rel_k: float = 0.5,           # max per-step tilt correction = atan(k)
+                 trim_ff: bool = False,            # TRIM FEEDFORWARD: the episode's trim
+                 #                                   (attitude, elevator, thrust) is solved once
+                 #                                   at reset and the policy commands only the
+                 #                                   DEVIATION from it. a=0 holds trim, which is
+                 #                                   an absolute reference (unlike att_rel).
+                 trim_ff_k: float = 0.4,           # tilt deviation scale: max atan(k) ~ 22 deg
+                 trim_ff_thrust: float = 0.4,      # thrust deviation span, x NOMINAL_HOVER
+                 trim_ff_fin: float = 0.5,         # elevon deviation span, x FIN_MAX
+                 trim_ff_true_wind: bool = True,   # index the trim with the TRUE wind
+                 #                                   (privileged: ceiling test). False = use the
+                 #                                   observer's wind estimate (deployable).
                  fin_assist: float = 0.0,          # att_cmd: elevator follows the pitch-rate
                  #                                   command (fin authority scales with V^2,
                  #                                   motor torque does not); policy fin action
@@ -73,6 +93,8 @@ class RateVelAviary(BaseAviary):
                  use_vel_integral: bool = True,    # leaky+clamped velocity-error integral
                  use_yaw_integral: bool = True,    # leaky+clamped yaw-error integral
                  integral_tau: float = 3.0,        # leak time constant (s): anti-windup + forgets old
+                 yaw_integral_tau=None,            # separate leak for the yaw integral
+                 #                                   (None = same as integral_tau)
                  # --- heading objective ---
                  yaw_reward_width: float = 0.35,   # rad; sharp-peak width of the heading reward
                  yaw_weight: float = 1.0,          # weight of the heading objective in the reward
@@ -81,6 +103,9 @@ class RateVelAviary(BaseAviary):
                  yaw_gate_floor: float = 0.2,      # fraction of the yaw reward that always pays
                  #                                   (higher -> more yaw pressure at high vel error)
                  vel_precision: float = 0.0,       # weight of an extra NARROW velocity peak
+                 rel_approach: float = 0.0,        # >0: scale-invariant approach basin weight
+                 rel_width: float = 0.5,           # basin width as a fraction of commanded speed
+                 rel_floor: float = 8.0,           # m/s commanded-speed floor (hover/low)
                  #                                   (1 - tanh(d/0.5)): gradient below ~1 m/s, where
                  #                                   the d/2 peak is already ~flat
                  cov_width: float = 0.0,           # wide-coverage Gaussian width (m/s);
@@ -133,6 +158,14 @@ class RateVelAviary(BaseAviary):
         self.PRIV_OBS = bool(priv_obs)
         self.ATT_CMD = bool(att_cmd)
         self.KATT = float(katt)
+        self.ATT_REL = bool(att_rel)
+        self.ATT_REL_K = float(att_rel_k)
+        self.TRIM_FF = bool(trim_ff)
+        self.TRIM_FF_K = float(trim_ff_k)
+        self.TRIM_FF_THRUST = float(trim_ff_thrust)
+        self.TRIM_FF_FIN = float(trim_ff_fin)
+        self.TRIM_FF_TRUE_WIND = bool(trim_ff_true_wind)
+        self._ff = None                            # (R_trim, de_trim, T_trim) or None
         self.FIN_ASSIST = float(fin_assist)
         self.WIND_OVERSAMPLE = float(wind_oversample)
         self.AIR_OBS = bool(air_obs)
@@ -143,12 +176,20 @@ class RateVelAviary(BaseAviary):
         self.USE_VEL_INTEGRAL = bool(use_vel_integral)
         self.USE_YAW_INTEGRAL = bool(use_yaw_integral)
         self.INTEGRAL_TAU = float(integral_tau)
+        # separate leak for the YAW integral: at speed the heading error is unsatisfiable by
+        # design (nose follows the velocity vector), so a long-memory yaw integral rails at
+        # +-pi and becomes a saturated, misleading input. None -> share INTEGRAL_TAU (legacy).
+        self.YAW_INTEGRAL_TAU = float(integral_tau if yaw_integral_tau is None
+                                      else yaw_integral_tau)
         self.YAW_REWARD_WIDTH = float(yaw_reward_width)
         self.YAW_WEIGHT = float(yaw_weight)
         self.YAW_BIAS_MAX = float(yaw_bias_max)
         self.YAW_GATE = bool(yaw_gate)
         self.YAW_GATE_FLOOR = float(yaw_gate_floor)
         self.VEL_PRECISION = float(vel_precision)
+        self.REL_APPROACH = float(rel_approach)
+        self.REL_WIDTH = float(rel_width)
+        self.REL_FLOOR = float(rel_floor)
         self.COV_WIDTH = float(cov_width)
         self.YAW_ATT_GATE = bool(yaw_att_gate)
         self.VELYAW_HEADING_FRAME = bool(velyaw_heading_frame)
@@ -408,6 +449,10 @@ class RateVelAviary(BaseAviary):
         if self.TRIM_INIT_FRAC > 0.0 and self.np_random.uniform() < self.TRIM_INIT_FRAC:
             self._apply_trim_init()
 
+        # TRIM FEEDFORWARD: target and wind are constant per episode, so the trim is solved
+        # ONCE here (~0.04 s) and reused every step as the action's reference point.
+        self._ff = self._solve_ff_trim() if self.TRIM_FF else None
+
         # position irrelevant -> fly freely (incl. downward targets / drift in wind)
         p.setCollisionFilterPair(int(self.PLANE_ID), int(self.DRONE_IDS[0]),
                                  -1, -1, enableCollision=0, physicsClientId=self.CLIENT)
@@ -428,8 +473,13 @@ class RateVelAviary(BaseAviary):
         j = int(np.argmin(np.abs(t["gammas"] - g)))
         R_can = _Rot.from_rotvec(t["rotvecs"][i, j])
         psi = float(np.arctan2(v_rel[1], v_rel[0]))            # rotate canonical x -> heading
+        R_tab = _Rot.from_euler("z", psi) * R_can
+        de_tab = float(t["des"][i, j])
+        # refine against THIS episode's DR draw (table is nominal-coeff; its residual grows
+        # with Q — ~3 m/s^2 at Va 40-55, degrading the goal-state exposure at top bands)
+        R_ref, de_ref, T_ref = self._refine_trim(R_tab, de_tab, v_rel)
         scatter = _Rot.from_rotvec(self.np_random.normal(size=3) * np.radians(10.0) / 1.732)
-        R = _Rot.from_euler("z", psi) * R_can * scatter
+        R = R_ref * scatter
         v0 = self.target_vel + self.np_random.normal(size=3) * 1.0
         did = int(self.DRONE_IDS[0])
         p.resetBasePositionAndOrientation(did, self.pos[0].tolist(), R.as_quat().tolist(),
@@ -437,11 +487,109 @@ class RateVelAviary(BaseAviary):
         p.resetBaseVelocity(did, v0.tolist(),
                             (self.np_random.uniform(-0.3, 0.3, size=3)).tolist(),
                             physicsClientId=self.CLIENT)
-        de = float(t["des"][i, j])
-        self.fin_angles = np.array([de, de])
-        self.motor_forces = np.full(4, float(t["thrusts"][i, j]) / 4.0 * self.M / 13.85)
+        self.fin_angles = np.array([de_ref, de_ref])
+        self.motor_forces = np.full(4, T_ref / 4.0)
         self._updateAndStoreKinematicInformation()
         self.prev_vel = self.vel[0].copy()
+
+    def _solve_ff_trim(self):
+        """Trim (R, elevator, thrust) for this episode's target and wind, from the table +
+        a short refinement against the actual aero draw. Returns None below ~2 m/s, where
+        the hover solution is trivial and the feedforward adds nothing."""
+        from scipy.spatial.transform import Rotation as _Rot
+        import os
+        wind = self.wind if self.TRIM_FF_TRUE_WIND else self._wind_vel_estimate()
+        v_rel = self.target_vel - wind
+        s = float(np.linalg.norm(v_rel))
+        if s < 2.0:
+            return None
+        if self._trim_table is None:
+            self._trim_table = dict(np.load(os.path.join(os.path.dirname(
+                os.path.abspath(__file__)), "trim_table.npz")))
+        t = self._trim_table
+        g = float(np.arcsin(np.clip(v_rel[2] / s, -1.0, 1.0)))
+        i = int(np.argmin(np.abs(t["speeds"] - s)))
+        j = int(np.argmin(np.abs(t["gammas"] - g)))
+        psi = float(np.arctan2(v_rel[1], v_rel[0]))
+        R_tab = _Rot.from_euler("z", psi) * _Rot.from_rotvec(t["rotvecs"][i, j])
+        sol = self._refine_trim(R_tab, float(t["des"][i, j]), v_rel)
+        # a feedforward REFERENCE must be right: ~8% of draws leave the table warm-start in a
+        # poor basin, so re-scan those (once per episode, only when needed).
+        if self._ff_residual(sol, v_rel) > 0.5:
+            best = sol
+            best_r = self._ff_residual(sol, v_rel)
+            for _ in range(12):
+                R0 = _Rot.from_rotvec(self.np_random.normal(size=3) * 1.2) * R_tab
+                cand = self._refine_trim(R0, float(t["des"][i, j]), v_rel)
+                r = self._ff_residual(cand, v_rel)
+                if r < best_r:
+                    best, best_r = cand, r
+                if best_r <= 0.05:
+                    break
+            sol = best
+        return sol
+
+    def _ff_residual(self, sol, v_rel):
+        """Residual acceleration (m/s^2) left by a candidate trim under THIS episode's draw."""
+        R, de, T = sol
+        Rm = R.as_matrix()
+        v_xw = self._P_XW @ (Rm.T @ v_rel)
+        Va = float(np.linalg.norm(v_xw))
+        if Va < 1e-4:
+            return 0.0
+        u, vv, w = v_xw
+        al = float(np.arctan2(-vv, u))
+        be = float(np.arcsin(np.clip(w / Va, -1.0, 1.0)))
+        F, _ = func_aero_model(al, be, Va, np.zeros(3), self.RHO, self.AERO_S, self.AERO_C,
+                               self.AERO_B, (self.XG, self.YG, self.ZG), de, de, self.aero_rand)
+        Fw = Rm @ (self._P_XW.T @ F) + np.array([0.0, 0.0, -self.M * 9.8]) + Rm[:, 2] * T
+        return float(np.linalg.norm(Fw)) / self.M
+
+    def _wind_vel_estimate(self):
+        """Deployable stand-in for the wind VELOCITY: the disturbance observer estimates an
+        external force; at quasi-steady flight the wind-induced part is recovered by
+        differencing ground velocity against the axial air-relative speed the pitot sees."""
+        R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
+        axial = R[:, 2]
+        pitot = float(axial @ (self.vel[0] - self.wind))    # sensor reading (axial airspeed)
+        return self.vel[0] - pitot * axial
+
+    def _refine_trim(self, R_tab, de_tab, v_rel):
+        """Short warm-started solve of (attitude, elevator) against THIS episode's actual
+        aero draw and mass; returns (R, de, total thrust)."""
+        from scipy.spatial.transform import Rotation as _Rot
+        from scipy.optimize import minimize as _min
+        G = np.array([0.0, 0.0, -self.M * 9.8])
+
+        def resid(x):
+            R = _Rot.from_rotvec(x[:3]).as_matrix()
+            de = float(np.clip(x[3], -self.FIN_MAX, self.FIN_MAX))
+            v_xw = self._P_XW @ (R.T @ v_rel)
+            Va = float(np.linalg.norm(v_xw))
+            if Va < 1e-4:
+                Fw = G
+            else:
+                u, vv, w = v_xw
+                al = float(np.arctan2(-vv, u))
+                be = float(np.arcsin(np.clip(w / Va, -1.0, 1.0)))
+                F, _ = func_aero_model(al, be, Va, np.zeros(3), self.RHO, self.AERO_S,
+                                       self.AERO_C, self.AERO_B, (self.XG, self.YG, self.ZG),
+                                       de, de, self.aero_rand)
+                Fw = R @ (self._P_XW.T @ F) + G
+            bz = R[:, 2]
+            T = float(np.clip(-(Fw @ bz), 0.0, self.MAX_TOTAL_THRUST))
+            return float(np.linalg.norm(Fw + T * bz)), T
+
+        x0 = np.concatenate([R_tab.as_rotvec(), [de_tab]])
+        try:
+            res = _min(lambda x: resid(x)[0], x0, method="Nelder-Mead",
+                       options={"maxiter": 150, "xatol": 1e-4, "fatol": 1e-3})
+            x = res.x
+        except Exception:
+            x = x0
+        _, T = resid(x)
+        return (_Rot.from_rotvec(x[:3]),
+                float(np.clip(x[3], -self.FIN_MAX, self.FIN_MAX)), T)
 
     def _resample_target(self):
         d = self.np_random.normal(size=3)
@@ -571,14 +719,29 @@ class RateVelAviary(BaseAviary):
         sub-step; apply achieved wrench + wind + gravity, then update estimators + integrals."""
         self.current_action = np.clip(np.asarray(action, dtype=float).reshape(self.ACT_DIM), -1.0, 1.0)
         thrust_des, omega_des = self._decode_action(self.current_action)
-        if self.ATT_CMD:
-            # a[3:5] -> desired body-z direction (upper hemisphere; norm<=0.985 keeps it well-
-            # conditioned up to ~80 deg tilt); a[5] -> yaw rate about body z.
+        if self.ATT_CMD and self.TRIM_FF and self._ff is not None:
+            # deviation from the episode's trim: a=0 holds trim exactly (absolute reference)
+            R_ff, de_ff, T_ff = self._ff
             xy = self.current_action[-3:-1]
-            n = float(np.linalg.norm(xy))
-            if n > 0.985:
-                xy = xy * (0.985 / n)
-            self._bz_des = np.array([xy[0], xy[1], np.sqrt(max(1.0 - xy @ xy, 1e-6))])
+            v = np.array([self.TRIM_FF_K * xy[0], self.TRIM_FF_K * xy[1], 1.0])
+            self._bz_des = R_ff.as_matrix() @ (v / np.linalg.norm(v))
+            self._yaw_rate_des = float(self.current_action[-1]) * float(self.MAX_RATE[2])
+            thrust_des = float(np.clip(
+                T_ff + self.current_action[2] * self.TRIM_FF_THRUST * self.NOMINAL_HOVER,
+                0.0, self.MAX_TOTAL_THRUST))
+        elif self.ATT_CMD:
+            xy = self.current_action[-3:-1]
+            if self.ATT_REL:
+                # body-relative: a=0 holds the current thrust axis; max correction atan(k)
+                R0 = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
+                v = np.array([self.ATT_REL_K * xy[0], self.ATT_REL_K * xy[1], 1.0])
+                self._bz_des = R0 @ (v / np.linalg.norm(v))
+            else:
+                # world-frame upper hemisphere (norm<=0.985 caps tilt at ~80 deg)
+                n = float(np.linalg.norm(xy))
+                if n > 0.985:
+                    xy = xy * (0.985 / n)
+                self._bz_des = np.array([xy[0], xy[1], np.sqrt(max(1.0 - xy @ xy, 1e-6))])
             self._yaw_rate_des = float(self.current_action[-1]) * float(self.MAX_RATE[2])
         v_prev = self.vel[0].copy()
 
@@ -586,6 +749,9 @@ class RateVelAviary(BaseAviary):
         for _ in range(self.PYB_STEPS_PER_CTRL):
             if self.USE_ELEVONS:
                 fin_norm = self.current_action[:2]
+                if self.TRIM_FF and self._ff is not None:
+                    fin_norm = np.clip(self._ff[1] / self.FIN_MAX
+                                       + self.TRIM_FF_FIN * fin_norm, -1.0, 1.0)
                 if self.ATT_CMD and self.FIN_ASSIST > 0.0:
                     assist = float(np.clip(self.FIN_ASSIST * self._omega_des_last[1]
                                            / self.MAX_RATE[1], -1.0, 1.0))
@@ -608,7 +774,7 @@ class RateVelAviary(BaseAviary):
         if self.USE_YAW_INTEGRAL:
             R = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
             dpsi = self._yaw_error(R)
-            self.yaw_integral += (dpsi - self.yaw_integral / self.INTEGRAL_TAU) * self.CTRL_TIMESTEP
+            self.yaw_integral += (dpsi - self.yaw_integral / self.YAW_INTEGRAL_TAU) * self.CTRL_TIMESTEP
             self.yaw_integral = float(np.clip(self.yaw_integral, -np.pi, np.pi))
 
         obs = self._computeObs()
@@ -704,6 +870,19 @@ class RateVelAviary(BaseAviary):
             # narrow precision peak: the d/2 term is ~flat below 2 m/s, so this adds
             # gradient in the sub-1 m/s regime (width 0.5 m/s)
             r_vel += self.VEL_PRECISION * (1.0 - np.tanh(d / 0.5))
+        if self.REL_APPROACH > 0.0:
+            # SCALE-INVARIANT APPROACH BASIN — the fix that makes one policy trainable over a
+            # wide speed range. Every term above has an ABSOLUTE width and must keep it: the
+            # goal is <1 m/s at any speed, so a relative goal would reward +-25 m/s at 50.
+            # But absolute widths are numerically DEAD far from a fast target: an episode
+            # starts at rest, so commanded 50 m/s means d=50, where the shaped gradient is
+            # 4e-22 (vs 1.3e-1 at 5 m/s) — 21 orders of magnitude of vanishing signal. That,
+            # not capacity, is why fast bands never trained from scratch and why trim-init
+            # (which starts the episode AT the target, inside the live region) was the biggest
+            # single gain at speed. This basin's width is a FRACTION OF THE COMMANDED SPEED,
+            # so the pull from rest is the same at 5 and 50 m/s, while the goal stays absolute.
+            vs = max(float(np.linalg.norm(self.target_vel)), self.REL_FLOOR)
+            r_vel += self.REL_APPROACH * np.exp(-0.5 * (d / (self.REL_WIDTH * vs)) ** 2)
         r_yaw = (1.0 - np.tanh(a / w)) + np.exp(-0.5 * (a / 1.0) ** 2)
         joint = (1.0 - np.tanh(d / 2.0)) * (1.0 - np.tanh(a / w))
         # yaw gate: scale the yaw payout by velocity coverage; the floor fraction always pays
@@ -714,7 +893,17 @@ class RateVelAviary(BaseAviary):
             # so a random desired_yaw is structurally unsatisfiable at speed.
             # R[2,2] = 1 in hover (yaw fully enforced) -> 0 at 90-deg tilt (yaw released).
             gate = gate * float(np.clip(R[2, 2], 0.0, 1.0))
-        reward = r_vel + self.YAW_WEIGHT * gate * r_yaw + 0.5 * joint - (0.02 / s) * d + smooth
+        # Linear far-field pull. The legacy coefficient is 0.02/s = 0.4/MAX_SPEED, i.e. it is
+        # weakened by widening the envelope — a 0–50 policy gets 0.0080/(m/s) where a 0–10
+        # specialist gets 0.0400, so asking for more range mechanically weakens the only term
+        # that survives far from a fast target. Keyed to the COMMANDED speed instead, it
+        # reproduces exactly what a specialist at that speed would have felt (0.4 at full-scale
+        # error) at every commanded speed inside one policy.
+        if self.REL_APPROACH > 0.0:
+            lin = 0.4 / max(float(np.linalg.norm(self.target_vel)), self.REL_FLOOR)
+        else:
+            lin = 0.02 / s
+        reward = r_vel + self.YAW_WEIGHT * gate * r_yaw + 0.5 * joint - lin * d + smooth
         if self._crashed():
             reward -= 10.0
         return float(reward)

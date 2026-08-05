@@ -84,3 +84,21 @@ wind bins: [0-5) n=23 med 1.08 <1: 39%  [5-10) n=42 med 1.12 <1: 43%  [10-15) n=
   t= 4.0 |v|= 17.7 vz=   1.6 tilt=  44 verr=  2.0 yawerr=  -1.2 fins=(-17.4,-20.0) thr=-0.91
   t= 6.0 |v|= 18.2 vz=   2.3 tilt=  45 verr=  2.0 yawerr=  -1.6 fins=(-17.0,-20.0) thr=-1.00
 ```
+
+## Exact code changes
+```python
+# continue_train.py — flags (NEW; enables band-extension transfer on a continuation):
+    ap.add_argument("--max-speed-override", type=float, default=None,
+                    help="widen the target-speed envelope for this continuation (band-extension "
+                         "transfer); obs scaling uses the same MAX_SPEED so update config too")
+    ap.add_argument("--speed-min-override", type=float, default=None)
+
+# continue_train.py — applied to the copied config before env construction (NEW):
+    if args.max_speed_override is not None:
+        cfg["max_speed"] = args.max_speed_override
+    if args.speed_min_override is not None:
+        cfg["speed_min"] = args.speed_min_override
+```
+Note the obs scaling: `vel_err / MAX_SPEED` and `tgt / MAX_SPEED` shift when MAX_SPEED
+changes, so each extension stage also rescales the policy's inputs — bounded per stage
+(x0.857 for 18->21, x0.84 for 21->25) and re-learned during the stage.

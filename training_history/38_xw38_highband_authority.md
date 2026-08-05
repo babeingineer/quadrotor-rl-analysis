@@ -143,3 +143,40 @@ wind bins: [0-5) n=23 med 4.50 <1: 0%  [5-10) n=42 med 4.99 <1: 2%  [10-15) n=35
 
 *(Note: the chain's final auto-analysis ran on xw38d — a script quirk on the STOP branch;
 the band's BEST checkpoint remains xw38c per the robust evals above.)*
+
+## Exact code changes
+```python
+# rate_vel_aviary.py — constructor arg (NEW):
+                 fin_assist: float = 0.0,          # att_cmd: elevator follows the pitch-rate
+                 #                                   command (fin authority scales with V^2,
+                 #                                   motor torque does not); policy fin action
+                 #                                   adds on top
+
+# rate_vel_aviary.py — __init__ (NEW):
+        self.FIN_ASSIST = float(fin_assist)
+        self._omega_des_last = np.zeros(3)
+
+# rate_vel_aviary.py — _control_wrench(), att_cmd branch (ADDED last line):
+            omega_des = R.T @ omega_w
+            omega_des[2] = self._yaw_rate_des
+            omega_des = np.clip(omega_des, -self.MAX_RATE, self.MAX_RATE)
+            self._omega_des_last = omega_des
+
+# rate_vel_aviary.py — step(), elevon application (CHANGED):
+            if self.USE_ELEVONS:
+                fin_norm = self.current_action[:2]
+                if self.ATT_CMD and self.FIN_ASSIST > 0.0:
+                    assist = float(np.clip(self.FIN_ASSIST * self._omega_des_last[1]
+                                           / self.MAX_RATE[1], -1.0, 1.0))
+                    fin_norm = np.clip(fin_norm + assist, -1.0, 1.0)
+                fin_cmd = (self.FIN_MAX * fin_norm) * self.fin_gain + self.fin_offset
+
+# train.py — flags (NEW):
+    ap.add_argument("--fin-assist", type=float, default=0.0,
+                    help="att-cmd: elevator follows the pitch-rate command with this gain "
+                         "(fin authority scales with V^2; motor torque does not)")
+# config key "fin_assist"; eval_velyaw.py / continue_train.py pass it through with
+# fin_assist=cfg.get("fin_assist", 0.0)
+```
+
+Run flags: `--katt 3.0 --fin-assist 2.0 --kp-rate 40,40,25 --ki-rate 10,10,5`.
