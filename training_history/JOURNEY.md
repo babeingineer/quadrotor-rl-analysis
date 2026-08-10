@@ -1,26 +1,54 @@
-# The journey: 81.7 → 0.44 m/s (velyaw task, XWing physics)
+# The journey: 81.7 m/s → one policy over 0–50 m/s (velyaw task, XWing physics)
 
 Concise record of how velocity error improved ~185× on the bands that were solved, what failed,
 what worked, and why. Details per trial: [INDEX.md](INDEX.md). Benchmark: wind 0–20 m/s through
-trial 10, **0–15 m/s (real spec) from trial 11**; from trial 59 the headline is the **composite**
-(band specialists routed by commanded speed) under full DR.
+trial 10, **0–15 m/s (real spec) from trial 11**. The headline system was the **composite** (band
+specialists routed by commanded speed) from trial 59, and is the **single 0–50 policy** from
+trial 80 onward. All numbers under full DR.
 
-**FINAL STATE (2026-08-05, campaign stopped by user directive — no new training).**
+**FINAL STATE (2026-08-10, campaign stopped by user directive).**
 
-| band | median | %<1 | recovery from upset |
-|---|---|---|---|
-| hover 0–1 | 0.27 | 80% | — |
-| low 1–10 | **0.44** | 75% | 60% |
-| mid 10–18 | **0.77** | 64% | 57% |
-| high 18–25 | 1.77 | 27% | 35% |
-| vhigh 25–34 | 5.73 | 3% | 32% |
-| pooled | 1.22 [CI 1.04–1.60] | 44% | 46% [40–53] |
+The deliverable is now a **SINGLE policy over 0–50 m/s** (`results_velyaw_xw80_h`, 64M steps in
+one lineage), which supersedes the four-specialist composite as the system, though not as the
+most precise thing on 0–34.
 
-**Goal met on 0–18 m/s; missed above it; 34–50 m/s never covered by any policy.** The target
-moved 0–25 → 0–45 → 0–50 m/s over the campaign. Trims are verified feasible within actuator
-limits to 60 m/s, so what remains is controller quality, not physics. The likely reason the fast
-bands never trained is documented at trial 70 (a reward that goes numerically dead at speed) —
-found by reading the reward, quantified, implemented, and **never trained**.
+| band | single policy | composite specialist |
+|---|---|---|
+| hover 0–1 | **0.41 (83% <1)** | 0.27 |
+| low 1–10 | **0.56 (81% <1)** | 0.44 |
+| mid 10–18 | 1.25 (36%) | 0.77 |
+| high 18–25 | 2.28 (15%) | 1.77 |
+| vhigh 25–35 | 5.58 (1%) | 5.73 ← single policy wins |
+| top 35–45 | 9.79 (1%) | **none exists** |
+| pooled 0–50 | **2.97 [2.54–3.77], 25% <1** | cannot fly the range |
+
+On the composite's own 0–34 range: **1.51 [1.28–1.63] vs 1.22 [1.04–1.60]** — CIs overlap. One
+network essentially matches four specialists plus a router, covers a band none of them can fly,
+and costs less in total.
+
+**The <1 m/s goal is not met.** Hover and low clear it by median; mid/high/vhigh/top do not.
+
+## ★ 2026-08-07..10 — how one policy caught four specialists
+Three ingredients, each isolated:
+1. **Scale-invariant approach reward** (73): absolute reward widths are numerically dead far from
+   a fast target (shaped gradient 1.3e-1 at 5 m/s → **3.9e-22 at 50**). Basin width tracks the
+   commanded speed; goal terms stay absolute.
+2. **Command-scaled observation** (79): `vel_err / MAX_SPEED` leaves a 0.5 m/s hover error at
+   0.01, and VecNormalize's running std is dominated by fast-band errors. Adding
+   `vel_err / max(|target|, 8)` took hover **2.01 → 0.74, 0% → 67% <1** — pooled-neutral, so the
+   aggregate hid it. Second time in this campaign a real effect was masked by a pooled statistic.
+3. **Speed curriculum in one lineage** (80): 0-18 → 0-25 → 0-34 → 0-45 → 0-50, then convergence.
+   Flat 0–50 plateaued at 4.04 / 3% <1; the curriculum reached **2.97 / 25% <1**.
+
+Refuted along the way: **full-sphere attitude** (78) was 3.5× worse — lifting the 80° tilt cap by
+rescaling the action map halved resolution everywhere, worst at hover (3.7×). The lesson is that
+`arcsin` was well matched to the task (fine near hover, coarse near the cap), and any interface
+change must preserve that.
+
+**What is left.** The fast bands, and specifically **descents**: 9.55 vs 2.87 for climbs (3.3×),
++15.9 m/s undershoot at γ=−40. Steep descents at 35–50 m/s need 93–105° of tilt against an 80°
+cap. The corrected interface fix (81) was stopped before producing any result, so that hypothesis
+is **untested, not supported**.
 
 ## The scoreboard
 
@@ -210,8 +238,100 @@ pull ∝ commanded speed, reproducing exactly what a specialist at that speed fe
 Far-field gradient improves 2.4–5.9× with near-field shape unchanged; legacy is bit-identical at
 `rel_approach=0`.
 
-**NOT TRAINED** — user directive to stop starting runs. So this is a quantified mechanism and a
-working implementation, not a result. Lesson worth keeping regardless: *before blaming capacity,
-memory, or interference for a wide-range RL failure, evaluate the reward numerically at the
-edges of the range.* Six trials tested architecture; none had checked whether the objective was
-still finite out there.
+**Superseded by trial 73, which actually ran the ablation**: four matched 4M arms (legacy /
+command-linear / basin / both) on one 0–45 policy. `basin` was PROMOTED — worst-band median
+18.93 vs legacy's 32.48, top band −41.7% — confirming the mechanism is real. But **all four arms
+scored 0% of episodes below 1 m/s**, so the reward fix moves the fast bands without coming near
+the goal, which is exactly what trial 75 then explains. Lesson worth keeping: *before blaming
+capacity, memory, or interference for a wide-range RL failure, evaluate the reward numerically at
+the edges of the range.* Six trials tested architecture; none had checked whether the objective
+was still finite out there.
+
+## ★ 2026-08-05 (audit) — best checkpoints were not propagated reproducibly
+
+A full-history audit found an independent confound in the high-speed staircase. Physical
+evaluation loads each run's best PPO weights but pairs them with the run's final
+`VecNormalize` statistics. Continuation instead defaults to final PPO weights plus final stats,
+and every inspected staircase script used that default. In xw55a/xw58b/xw60a the final mean
+eval return was only 56%/45%/52% of the within-run best. The record therefore proves that
+continuing the propagated **final** checkpoints regressed; it does not prove that continuation
+from an atomic best-weight + matching-normalization checkpoint also fails.
+
+The same audit corrected trial 70's premise: training starts are randomized up to `MAX_SPEED`,
+not at rest. A million-sample calculation under the actual 0–45 reset distribution still finds
+the combined fix improves median reset-gradient magnitude by 2.6–5.0× across bands, but most of
+the low/mid gain comes from the command-keyed linear pull while the relative basin is inactive.
+The two changes must be split and ablated after checkpoint integrity is repaired. Full evidence
+and the pre-registered experiment are in [71_checkpoint_reward_audit.md](71_checkpoint_reward_audit.md).
+
+## ★ 2026-08-05 (integrity fix) — the range staircase trained one stage behind
+
+Implementing the checkpoint audit uncovered a larger historical bug: `continue_train.py` built
+the environment arguments before applying speed-range and integral overrides. Destination configs
+and evaluations used the requested range, but training used the source range. Changed-range
+staircases were therefore one rung behind their labels. Most importantly, trials 63/65/66 did
+not train on the narrowed/widened spans they claimed, so those causal verdicts are invalid;
+trial 61 received only 8M, not 16M, of actual split-integral adaptation. xw60a did eventually
+train 27–40 because its consolidation used no range override. No verified stage trained 40–45.
+
+The code now applies overrides before constructing environments; saves paired, hashed best
+model + normalization bundles; requires explicit continuation sources; redirects inherited
+TensorBoard state; and separates trial 70's linear and basin changes. Simulator and tiny-PPO
+smokes pass. The matched four-arm 0–45 reward screen is prepared but not launched. Full details:
+[72_training_integrity_fixes.md](72_training_integrity_fixes.md).
+
+## ★ 2026-08-06 (trial 73) — relative basin passes the clean reward screen
+
+The first integrity-correct fresh 0–45 m/s ablation trained four matched 4M-step policies and
+selected every arm from 42 model/normalization pairs by held-out worst-band physical error.
+Independent evaluation used 100 episodes in each of six speed bands. Legacy failed completely:
+11.60/12.60/17.11/20.04/25.97/32.48 m/s band medians and 0% below 1 m/s. Command-linear improved
+fast flight but narrowly missed the top-band gate and badly degraded nominal yaw. Combining both
+terms also improved fast bands but regressed low speed beyond the gate.
+
+Relative basin alone passed: 14.12/14.40/12.21/14.25/18.10/18.93 m/s medians, zero crashes,
+30.3% vhigh and 41.7% top improvement, and no below-25 regression above 30%. Nominal yaw was
+23.0 degrees, better than legacy. It is still nowhere near final acceptance (0.2% pooled below
+1 m/s and 5% upset recovery), so this result promotes a mechanism, not a controller. Next:
+replicate basin across three seeds, then address band imbalance/convergence. Full record:
+[73_xw73_reward_ablation.md](73_xw73_reward_ablation.md).
+
+## ★ 2026-08-05 (research, no training) — the fast bands fail at DESCENTS, and it is stabilization
+Continuing the analysis rather than proposing another mechanism, I checked trial 70's claim
+against the trained policies and found it needed correcting: at each champion's own operating
+point the **unclaimed reward is largest at vhigh (2.24)** and the reward is **convex** there
+(marginal payout 0.14 → 0.54 → 1.09 as error shrinks). The fast bands are declining a large,
+growing payout. Trial 70's dead zone is the far-field *approach*, not the residual.
+
+Sorting fast-band episodes by what actually differs found it immediately: **flight-path angle**.
+A stratified sweep (γ forced, n=24/angle, all four bands) shows a monotonic, replicated
+asymmetry at matched speed:
+
+| band | descents | climbs | ratio |
+|---|---|---|---|
+| low 0–10 | 0.89 | 0.67 | 1.3× |
+| mid 10–18 | 1.83 | 0.79 | 2.3× |
+| high 18–25 | 4.59 | 1.51 | 3.0× |
+| vhigh 25–34 | 10.16 | 2.44 | **4.2×** |
+
+Targets are sampled uniformly on the sphere, so **half of every band's commands are descents** —
+this has been setting the band medians for the whole campaign and nobody had looked.
+
+Five candidate causes, five eliminations (four of them mine, two refuted by data already in my
+own output): physics (per-draw trim infeasible ~0%), thrust floor (bites only at γ≤−30 while the
+penalty ramp is smooth), required trim tilt (the low band shows a 2.08× spread at *constant*
+tilt), settling time (20 s episodes leave the gap slightly WIDER), and finally entry — the
+decisive one. Started AT the commanded descent in near-trim attitude, the policy still fails:
+**12.82 vs 1.88 = 6.83×, worse than from rest.** It is placed in a feasible, trimmable, better-
+paying state and *departs from it*.
+
+So this is **stabilization**, not entry, settling, physics, or incentive. Untested candidate
+origin worth flagging: the policy actively drifts shallower, which is the signature of a learned
+aversion to descending — and trials 01–04 spent their whole effort destroying a **dive
+attractor**, with the yaw gate (the campaign's single biggest win, 41.3 → 9.2) working precisely
+by making diving unprofitable. If that generalised into "don't descend", the fast-band gap is a
+curriculum artifact rather than an aerodynamic limit. Testing it needs training, which is
+currently stopped.
+
+Method lesson: **stratify the evaluation before theorising.** Forty trials optimised a median
+that was averaging over a 4× asymmetry nobody had measured.

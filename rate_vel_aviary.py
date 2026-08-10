@@ -43,6 +43,8 @@ class RateVelAviary(BaseAviary):
                  episode_len_sec: float = 8.0,
                  max_speed: float = 25.0,
                  speed_min: float = 0.0,          # min target speed (band-limited training)
+                 target_speed_max=None,           # optional target upper bound independent of
+                                                  # MAX_SPEED obs/integral normalization
                  # --- airframe / domain randomization (small tailsitter VTOL) ---
                  mass_range=(2.0, 5.0),
                  motor_max_thrust: float = 40.0,   # N per motor (4 -> 160 N total)
@@ -103,7 +105,12 @@ class RateVelAviary(BaseAviary):
                  yaw_gate_floor: float = 0.2,      # fraction of the yaw reward that always pays
                  #                                   (higher -> more yaw pressure at high vel error)
                  vel_precision: float = 0.0,       # weight of an extra NARROW velocity peak
-                 rel_approach: float = 0.0,        # >0: scale-invariant approach basin weight
+                 att_tilt_max: float = 0.0,        # >0: full-sphere thrust axis, max tilt (deg)
+                 att_tilt_ext: float = 0.0,        # >0: legacy map to 64 deg then extend to this
+                 rel_obs: bool = False,            # add command-scaled velocity error to obs
+                 rel_approach: float = 0.0,        # legacy alias: basin + command-keyed linear
+                 rel_basin: float = 0.0,           # scale-invariant approach-basin weight only
+                 cmd_linear: bool = False,         # key far-field linear pull to command speed
                  rel_width: float = 0.5,           # basin width as a fraction of commanded speed
                  rel_floor: float = 8.0,           # m/s commanded-speed floor (hover/low)
                  #                                   (1 - tanh(d/0.5)): gradient below ~1 m/s, where
@@ -146,6 +153,11 @@ class RateVelAviary(BaseAviary):
         self.EPISODE_LEN_SEC = episode_len_sec
         self.MAX_SPEED = float(max_speed)
         self.SPEED_MIN = float(speed_min)
+        self.TARGET_SPEED_MAX = float(max_speed if target_speed_max is None
+                                      else target_speed_max)
+        if not 0.0 <= self.SPEED_MIN <= self.TARGET_SPEED_MAX <= self.MAX_SPEED:
+            raise ValueError("target speed range must satisfy 0 <= speed_min <= "
+                             "target_speed_max <= max_speed")
         self.MASS_RANGE = (float(mass_range[0]), float(mass_range[1]))
         self.MOTOR_MAX = float(motor_max_thrust)
         self.ARM = float(arm_length)
@@ -187,7 +199,15 @@ class RateVelAviary(BaseAviary):
         self.YAW_GATE = bool(yaw_gate)
         self.YAW_GATE_FLOOR = float(yaw_gate_floor)
         self.VEL_PRECISION = float(vel_precision)
-        self.REL_APPROACH = float(rel_approach)
+        if rel_approach > 0.0 and (rel_basin != 0.0 or cmd_linear):
+            raise ValueError("rel_approach is the legacy combined alias; do not combine it with "
+                             "rel_basin or cmd_linear")
+        self.ATT_TILT_MAX = float(att_tilt_max)
+        self.ATT_TILT_EXT = float(att_tilt_ext)
+        self.REL_OBS = bool(rel_obs)
+        self.REL_APPROACH = float(rel_approach)     # retained for old configs/introspection
+        self.REL_BASIN = float(rel_approach if rel_approach > 0.0 else rel_basin)
+        self.CMD_LINEAR = bool(rel_approach > 0.0 or cmd_linear)
         self.REL_WIDTH = float(rel_width)
         self.REL_FLOOR = float(rel_floor)
         self.COV_WIDTH = float(cov_width)
@@ -299,6 +319,8 @@ class RateVelAviary(BaseAviary):
         # same "sense the actuator" rationale as motor RPM)
         dim = 27 + (3 if self.USE_WIND_EST else 0) + (3 if self.USE_VEL_INTEGRAL else 0) \
               + 2 + (1 if self.USE_YAW_INTEGRAL else 0) + (4 if self.USE_ELEVONS else 0)
+        if self.REL_OBS:
+            dim += 3                      # command-scaled velocity error
         if self.AIR_OBS:
             dim += 3
         # privileged tail (CRITIC-ONLY): hidden episode draw appended so an asymmetric
@@ -595,7 +617,14 @@ class RateVelAviary(BaseAviary):
         d = self.np_random.normal(size=3)
         n = np.linalg.norm(d)
         d = d / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
-        self.target_vel = d * self.np_random.uniform(self.SPEED_MIN, self.MAX_SPEED)
+        self.target_vel = d * self.np_random.uniform(self.SPEED_MIN, self.TARGET_SPEED_MAX)
+
+    def set_target_speed_range(self, lo, hi):
+        """Change target sampling without changing policy observation/integral scaling."""
+        lo, hi = float(lo), float(hi)
+        if not 0.0 <= lo <= hi <= self.MAX_SPEED:
+            raise ValueError("target speed range must stay inside [0, MAX_SPEED]")
+        self.SPEED_MIN, self.TARGET_SPEED_MAX = lo, hi
 
     # ------------------------------------------------------- CTBR decode + PID
     def _decode_action(self, action):
@@ -736,6 +765,36 @@ class RateVelAviary(BaseAviary):
                 R0 = np.array(p.getMatrixFromQuaternion(self.quat[0])).reshape(3, 3)
                 v = np.array([self.ATT_REL_K * xy[0], self.ATT_REL_K * xy[1], 1.0])
                 self._bz_des = R0 @ (v / np.linalg.norm(v))
+            elif self.ATT_TILT_EXT > 0.0:
+                # RESOLUTION-PRESERVING tilt extension. Trial 78 lifted the 80 deg cap by
+                # rescaling |xy| linearly onto 0-120 deg and was 3.5x WORSE, because it
+                # halved resolution everywhere (damage worst at hover, 3.7x). Legacy
+                # arcsin is fine near hover and already coarse near its cap, which suits
+                # the task. So keep legacy EXACTLY for |xy| <= 0.9 (0-64 deg) and spend
+                # only the outer 10% of the action ball reaching ATT_TILT_EXT, where
+                # steep descents live (measured need: 93-105 deg above 32 m/s).
+                n = float(np.linalg.norm(xy))
+                u = xy / n if n > 1e-6 else np.array([1.0, 0.0])
+                if n <= 0.9:
+                    tilt = float(np.arcsin(n))
+                else:
+                    f = min((n - 0.9) / 0.1, 1.0)
+                    t0 = float(np.arcsin(0.9))
+                    tilt = t0 + f * (np.radians(self.ATT_TILT_EXT) - t0)
+                self._bz_des = np.array([np.sin(tilt) * u[0], np.sin(tilt) * u[1],
+                                         np.cos(tilt)])
+            elif self.ATT_TILT_MAX > 0.0:
+                # FULL-SPHERE thrust-axis command. The legacy encoding below builds
+                # bz_des.z = +sqrt(1-|xy|^2), so the commanded axis is confined to the UPPER
+                # hemisphere and tilt is capped at arcsin(0.985) = 80.0 deg. Measured trim tilt
+                # for a steep descent is 82.6 deg at gamma=-30 and 93 deg at gamma=-40 (25-34
+                # m/s), i.e. OUTSIDE the action space at any action value — the aircraft can be
+                # asked to fly a descent it cannot be commanded into. Here |xy| maps linearly to
+                # tilt over [0, ATT_TILT_MAX], so past 90 deg is reachable.
+                n = float(np.linalg.norm(xy))
+                u = xy / n if n > 1e-6 else np.array([1.0, 0.0])
+                tilt = np.radians(self.ATT_TILT_MAX) * min(n, 1.0)
+                self._bz_des = np.array([np.sin(tilt) * u[0], np.sin(tilt) * u[1], np.cos(tilt)])
             else:
                 # world-frame upper hemisphere (norm<=0.985 caps tilt at ~80 deg)
                 n = float(np.linalg.norm(xy))
@@ -826,6 +885,15 @@ class RateVelAviary(BaseAviary):
                  rpm_norm]                        # 4  <- solves motor lag
         if self.USE_WIND_EST:
             parts.append(self.wind_est / self.NOMINAL_HOVER)   # 3  <- disturbance observer
+        if self.REL_OBS:
+            # COMMAND-SCALED velocity error. The absolute channel above divides by
+            # MAX_SPEED, so at MAX_SPEED=50 a 0.5 m/s hover error is 0.01 — and
+            # VecNormalize's running std is dominated by fast-band errors, compressing
+            # slow-speed signal toward zero. Measured: one 0-50 policy matches the
+            # specialist at 25-34 m/s (0.93x) but is 7.4x worse at hover. Dividing by the
+            # COMMANDED speed gives comparable resolution at every commanded speed.
+            vs = max(float(np.linalg.norm(tgt)), self.REL_FLOOR)
+            parts.append(np.clip(vel_err / vs, -3.0, 3.0))     # 3
         parts.append([pitot / self.MAX_SPEED])                 # 1  <- forward airspeed (drives wings)
         if self.USE_ELEVONS:
             parts.append(self.fin_angles / self.FIN_MAX)       # 2  <- actual servo deflections
@@ -870,7 +938,7 @@ class RateVelAviary(BaseAviary):
             # narrow precision peak: the d/2 term is ~flat below 2 m/s, so this adds
             # gradient in the sub-1 m/s regime (width 0.5 m/s)
             r_vel += self.VEL_PRECISION * (1.0 - np.tanh(d / 0.5))
-        if self.REL_APPROACH > 0.0:
+        if self.REL_BASIN > 0.0:
             # SCALE-INVARIANT APPROACH BASIN — the fix that makes one policy trainable over a
             # wide speed range. Every term above has an ABSOLUTE width and must keep it: the
             # goal is <1 m/s at any speed, so a relative goal would reward +-25 m/s at 50.
@@ -882,7 +950,7 @@ class RateVelAviary(BaseAviary):
             # single gain at speed. This basin's width is a FRACTION OF THE COMMANDED SPEED,
             # so the pull from rest is the same at 5 and 50 m/s, while the goal stays absolute.
             vs = max(float(np.linalg.norm(self.target_vel)), self.REL_FLOOR)
-            r_vel += self.REL_APPROACH * np.exp(-0.5 * (d / (self.REL_WIDTH * vs)) ** 2)
+            r_vel += self.REL_BASIN * np.exp(-0.5 * (d / (self.REL_WIDTH * vs)) ** 2)
         r_yaw = (1.0 - np.tanh(a / w)) + np.exp(-0.5 * (a / 1.0) ** 2)
         joint = (1.0 - np.tanh(d / 2.0)) * (1.0 - np.tanh(a / w))
         # yaw gate: scale the yaw payout by velocity coverage; the floor fraction always pays
@@ -899,7 +967,7 @@ class RateVelAviary(BaseAviary):
         # that survives far from a fast target. Keyed to the COMMANDED speed instead, it
         # reproduces exactly what a specialist at that speed would have felt (0.4 at full-scale
         # error) at every commanded speed inside one policy.
-        if self.REL_APPROACH > 0.0:
+        if self.CMD_LINEAR:
             lin = 0.4 / max(float(np.linalg.norm(self.target_vel)), self.REL_FLOOR)
         else:
             lin = 0.02 / s

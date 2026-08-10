@@ -14,9 +14,10 @@ import pybullet as p
 from eval_velyaw import load, evaluate, report
 
 
-def dive_recovery_test(D, n=60, ep_len=10.0):
+def dive_recovery_test(D, n=60, ep_len=10.0, **checkpoint_kwargs):
     """All episodes start mid-dive / mid-botched-transition (tough_init_frac=1)."""
-    model, venv, base = load(D, ep_len=ep_len, randomize_init=True, tough_init_frac=1.0)
+    model, venv, base = load(D, ep_len=ep_len, randomize_init=True,
+                             tough_init_frac=1.0, **checkpoint_kwargs)
     dt = base.CTRL_TIMESTEP; N = int(ep_len / dt)
     recovered = partial = 0; final_errs = []
     for i in range(n):
@@ -46,8 +47,8 @@ def dive_recovery_test(D, n=60, ep_len=10.0):
     return recovered / n
 
 
-def traces(D, seeds=(1005, 1012, 1020), ep_len=10.0):
-    model, venv, base = load(D, ep_len=ep_len)
+def traces(D, seeds=(1005, 1012, 1020), ep_len=10.0, **checkpoint_kwargs):
+    model, venv, base = load(D, ep_len=ep_len, **checkpoint_kwargs)
     dt = base.CTRL_TIMESTEP
     for seed in seeds:
         venv.seed(seed); obs = venv.reset(); model.reset()
@@ -77,12 +78,18 @@ if __name__ == "__main__":
     ap.add_argument("--ep-len", type=float, default=None,
                     help="eval episode length (s); default = the trained episode_len from "
                          "config.json, so slow-settling policies are not clipped early")
+    ap.add_argument("--checkpoint", choices=("auto", "best", "final", "legacy-best"),
+                    default="auto")
+    ap.add_argument("--model-file", default=None)
+    ap.add_argument("--vecnormalize-file", default=None)
     args = ap.parse_args()
     cfg = json.load(open(os.path.join(args.dir, "config.json")))
     ep_len = args.ep_len if args.ep_len is not None else float(cfg.get("episode_len", 10.0))
+    checkpoint_kwargs = dict(checkpoint=args.checkpoint, model_file=args.model_file,
+                             vecnormalize_file=args.vecnormalize_file)
     print(f"################ ANALYSIS: {args.dir} (ep_len {ep_len:g}s) ################")
     print(f"\n=== PHYSICAL EVAL (level start, full wind, {ep_len:g}s episodes) ===")
-    report(evaluate(args.dir, n=args.episodes, ep_len=ep_len))
-    dive_recovery_test(args.dir, ep_len=ep_len)
-    traces(args.dir, ep_len=ep_len)
+    report(evaluate(args.dir, n=args.episodes, ep_len=ep_len, **checkpoint_kwargs))
+    dive_recovery_test(args.dir, ep_len=ep_len, **checkpoint_kwargs)
+    traces(args.dir, ep_len=ep_len, **checkpoint_kwargs)
     print("\n[ANALYSIS DONE]")

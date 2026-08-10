@@ -19,18 +19,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
 from rate_vel_aviary import RateVelAviary
 from progress_callback import ProgressPlotCallback
-
-
-class VecNormSaveCallback(BaseCallback):
-    """Save VecNormalize stats on the checkpoint cadence so a killed run can resume
-    consistently (model ckpt + matching obs-normalization stats)."""
-    def __init__(self, env, path, every):
-        super().__init__(); self.env = env; self.path = path; self.every = every; self._last = 0
-
-    def _on_step(self):
-        if self.num_timesteps - self._last >= self.every:
-            self.env.save(self.path); self._last = self.num_timesteps
-        return True
+from checkpoint_utils import write_checkpoint_manifest
 
 
 class WindCurriculumCallback(BaseCallback):
@@ -148,13 +137,33 @@ def main():
     ap.add_argument("--vel-precision", type=float, default=0.0,
                     help="weight of the narrow (1-tanh(d/0.5)) velocity precision peak")
     ap.add_argument("--rel-approach", type=float, default=0.0,
-                    help="weight of the SCALE-INVARIANT approach basin (0 = legacy). Absolute "
+                    help="DEPRECATED combined alias: enable both --rel-basin at this weight "
+                         "and --cmd-linear. Absolute "
                          "reward widths go numerically dead far from a fast target (gradient "
                          "4e-22 at 50 m/s commanded) and the legacy linear pull is scaled by "
                          "20/MAX_SPEED, so widening the envelope weakens it. This adds a basin "
                          "whose width tracks the COMMANDED speed and keys the linear pull to it "
                          "too, leaving every absolute (goal) term untouched. Required to train "
                          "ONE policy over a wide range; try 1.0")
+    ap.add_argument("--rel-obs", action="store_true",
+                    help="add COMMAND-SCALED velocity error (3 dims) to the obs; the "
+                         "absolute channel divides by MAX_SPEED and loses slow-speed "
+                         "resolution over a wide envelope")
+    ap.add_argument("--att-tilt-ext", type=float, default=0.0,
+                    help="resolution-preserving tilt extension: legacy arcsin map for "
+                         "|xy|<=0.9 (0-64 deg), outer 10%% of the ball reaches this max "
+                         "tilt in degrees. Use instead of --att-tilt-max, which "
+                         "rescales the whole map and was refuted in trial 78.")
+    ap.add_argument("--att-tilt-max", type=float, default=0.0,
+                    help="0 = legacy upper-hemisphere thrust axis (tilt capped at 80 deg); "
+                         ">0 = full-sphere command with this max tilt in degrees. Steep "
+                         "descents at speed need 82-93 deg, which the legacy encoding "
+                         "cannot express at any action value.")
+    ap.add_argument("--rel-basin", type=float, default=0.0,
+                    help="weight of the command-scaled approach basin ONLY; use independently "
+                         "from --cmd-linear for the trial-72 ablation")
+    ap.add_argument("--cmd-linear", action="store_true",
+                    help="key the far-field linear pull to commanded speed ONLY")
     ap.add_argument("--rel-width", type=float, default=0.5,
                     help="approach-basin width as a fraction of commanded speed")
     ap.add_argument("--rel-floor", type=float, default=8.0,
@@ -182,13 +191,18 @@ def main():
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
 
+    if args.rel_approach > 0.0 and (args.rel_basin != 0.0 or args.cmd_linear):
+        ap.error("--rel-approach is the legacy combined alias; do not combine it with "
+                 "--rel-basin or --cmd-linear")
+    if args.rel_approach < 0.0 or args.rel_basin < 0.0:
+        ap.error("reward weights must be non-negative")
     if args.smoke:
         args.timesteps, args.n_envs = 20_000, 2
     os.makedirs(args.out_dir, exist_ok=True)
     use_integral = not args.no_integral
     use_yaw_integral = not args.no_yaw_integral
     use_wind_est = not args.no_wind_est
-    json.dump({"max_speed": args.max_speed, "speed_min": args.speed_min, "wind_max": args.wind_max, "use_integral": use_integral,
+    config = {"max_speed": args.max_speed, "speed_min": args.speed_min, "wind_max": args.wind_max, "use_integral": use_integral,
                "use_yaw_integral": use_yaw_integral, "use_wind_est": use_wind_est,
                "yaw_width": args.yaw_width, "yaw_weight": args.yaw_weight,
                "yaw_bias": args.yaw_bias, "heading_frame": args.heading_frame,
@@ -203,14 +217,18 @@ def main():
                "trim_ff_true_wind": not args.trim_ff_est_wind,
                "fin_assist": args.fin_assist, "air_obs": args.air_obs,
                "yaw_att_gate": args.yaw_att_gate, "cov_width": args.cov_width,
-               "rel_approach": args.rel_approach, "rel_width": args.rel_width,
+               "att_tilt_max": args.att_tilt_max, "att_tilt_ext": args.att_tilt_ext, "rel_obs": args.rel_obs,
+               "rel_approach": args.rel_approach, "rel_basin": args.rel_basin,
+               "cmd_linear": args.cmd_linear, "rel_width": args.rel_width,
                "rel_floor": args.rel_floor,
                "kp_rate": args.kp_rate, "ki_rate": args.ki_rate,
                "aero_dr": not args.no_aero_dr, "integral_tau": args.integral_tau,
                "yaw_integral_tau": args.yaw_integral_tau,
                "ent_coef": args.ent_coef, "gamma": args.gamma,
-               "episode_len": args.episode_len},
-              open(os.path.join(args.out_dir, "config.json"), "w"))
+               "episode_len": args.episode_len}
+    with open(os.path.join(args.out_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, sort_keys=True)
+        f.write("\n")
 
     base_kwargs = dict(episode_len_sec=args.episode_len, max_speed=args.max_speed,
                        speed_min=args.speed_min, wind_max=args.wind_max,
@@ -220,7 +238,9 @@ def main():
                        velyaw_heading_frame=args.heading_frame, use_xwing_aero=args.xwing_aero,
                        yaw_gate=args.yaw_gate, yaw_gate_floor=args.yaw_gate_floor,
                        vel_precision=args.vel_precision, yaw_att_gate=args.yaw_att_gate,
-                       rel_approach=args.rel_approach, rel_width=args.rel_width,
+                       att_tilt_max=args.att_tilt_max, att_tilt_ext=args.att_tilt_ext, rel_obs=args.rel_obs,
+                       rel_approach=args.rel_approach, rel_basin=args.rel_basin,
+                       cmd_linear=args.cmd_linear, rel_width=args.rel_width,
                        rel_floor=args.rel_floor,
                        cov_width=args.cov_width,
                        kp_rate=tuple(float(x) for x in args.kp_rate.split(",")),
@@ -260,7 +280,7 @@ def main():
 
     ckpt = CheckpointCallback(save_freq=max(100_000 // args.n_envs, 1),
                               save_path=os.path.join(args.out_dir, "ckpts"),
-                              name_prefix="ppo_ratevel")
+                              name_prefix="ppo_ratevel", save_vecnormalize=True)
     evalcb = ProgressPlotCallback(
         eval_env, out_dir=args.out_dir, tag="PPO-velyaw",
         best_model_save_path=os.path.join(args.out_dir, "best"),
@@ -268,9 +288,7 @@ def main():
         eval_freq=max(50_000 // args.n_envs, 1),
         n_eval_episodes=10, deterministic=True, render=False)
 
-    cbs = [ckpt, evalcb,
-           VecNormSaveCallback(train_env, os.path.join(args.out_dir, "vecnormalize.pkl"),
-                               every=100_000)]
+    cbs = [ckpt, evalcb]
     if args.wind_curriculum:
         cbs.append(WindCurriculumCallback(w0=8.0, w1=20.0,
                                           start=int(0.375 * args.timesteps),
@@ -279,6 +297,10 @@ def main():
 
     model.save(os.path.join(args.out_dir, "ppo_ratevel_final"))
     train_env.save(os.path.join(args.out_dir, "vecnormalize.pkl"))
+    write_checkpoint_manifest(
+        args.out_dir, os.path.join(args.out_dir, "ppo_ratevel_final.zip"),
+        os.path.join(args.out_dir, "vecnormalize.pkl"), model.num_timesteps,
+        manifest_name="checkpoint_final.json")
     print(f"[DONE] saved PPO model + vecnormalize to {args.out_dir}/")
     train_env.close(); eval_env.close()
 

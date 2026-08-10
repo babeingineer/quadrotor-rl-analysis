@@ -4,54 +4,80 @@ Full-RL velocity + heading control for a tailsitter VTOL (14 kg, 4×110 N motors
 elevons, ported XWing aerodynamic model) in PyBullet, built on
 [gym-pybullet-drones](https://github.com/utiasDSL/gym-pybullet-drones).
 
-**Task:** track a random 3-D target velocity (goal envelope 0–45 m/s) AND a commanded
+**Task:** track a random 3-D target velocity (goal envelope 0–50 m/s) AND a commanded
 heading, under per-episode wind (0–15 m/s) and ±20% domain randomization of aero
 coefficients, mass, motor lag, and servo gain. The policy (PPO, MLP 256×256) commands
 collective thrust + elevons + an attitude/rate setpoint; a PID inner loop runs at 500 Hz.
 
 ## Current results
 
-Composite of four band specialists routed by commanded speed, with a full-envelope generalist
-armed underneath as an upset-recovery mode. 400 nominal + 240 failure-state episodes under full
-randomization (`python eval_composite.py --episodes 400 --upsets 60 --recovery`).
+Two systems exist. The **single policy** (trial 80) is the deliverable the goal asks for — one
+network, one training lineage, no router. The **composite** (trials 59/69) is the older
+four-specialist system, kept because it is still the most precise thing on the range it covers.
 
-| band | median vel err | p90 | %<1 m/s | recovery from upset | notes |
-|---|---|---|---|---|---|
-| hover 0–1 | 0.27 | 2.18 | 80% | — | solved |
-| low 1–10 | 0.44 | 3.08 | 75% | 60% | solved |
-| mid 10–18 | 0.77 | 7.12 | 64% | 57% | solved |
-| high 18–25 | 1.77 | 14.45 | 27% | 35% | beats the classical cascade (3.90), misses the goal |
-| vhigh 25–34 | 5.73 | 18.79 | 3% | 32% | coverage only; switch unarmed (see limits) |
-| **pooled** | **1.22** [CI 1.04–1.60] | **13.98** | **44%** | **46%** [CI 40–53] | vs 22% [17–28] unarmed |
+### Single policy — `results_velyaw_xw80_h` (64M steps, one lineage)
+`python eval_velyaw.py --dir results_velyaw_xw80_h --episodes 300`
 
-Precision degrades with wind as expected: median 0.90 (0–5 m/s), 1.23 (5–10), 2.51 (10–15).
+| band | median vel err | %<1 m/s | yaw |
+|---|---|---|---|
+| hover 0–1 | **0.41** | 83% | 2.1° |
+| low 1–10 | **0.56** | 81% | 6.8° |
+| mid 10–18 | 1.25 | 36% | 10.8° |
+| high 18–25 | 2.28 | 15% | 17.0° |
+| vhigh 25–35 | 5.58 | 1% | 25.0° |
+| top 35–45 | 9.79 | 1% | 38.9° |
+| **pooled 0–50** | **2.97** [2.54–3.77] | **25%** | 0 crashes |
 
-**What the recovery mode costs.** Arming is a paired comparison against the same seeds (the
-harness is deterministic: 379 of 400 episodes are byte-identical between arms, max difference
-0.00). It engages on 4% of nominal flights; on those 16 episodes mean error goes 21.18 → 15.36,
-helping 9 and hurting 7, with improvements outweighing regressions 7.4:1 by magnitude (worst
-single regression +9.71 m/s). Pooled median is unchanged and pooled p90 improves 14.62 → 13.98.
-So it is **net beneficial with real per-episode variance** — not free, and not costly.
+### Single policy vs the four-specialist composite, on the composite's own range
+The composite has no policy above 34 m/s, so 0–34 is the only fair comparison:
+
+| system | 0–34 median | %<1 | flies 35–50? | deploys as |
+|---|---|---|---|---|
+| composite (4 specialists + router) | 1.22 [1.04–1.60] | 44% | no | 5 nets + routing + recovery switch |
+| **single policy (xw80_h)** | **1.51** [1.28–1.63] | 37% | **yes** | 1 net |
+
+CIs overlap. One network essentially matches four specialists plus a router on their own ground,
+covers a band none of them can fly, and costs less in total (64M steps vs 36M+ each).
+
+### How it was built (all three ingredients were necessary)
+1. **Scale-invariant approach reward** (`--rel-basin`, trial 73): absolute reward widths go
+   numerically dead far from a fast target — the shaped gradient at an episode's start falls from
+   1.3e-1 at 5 m/s to **3.9e-22 at 50 m/s**. The basin's width tracks the commanded speed while
+   every goal term stays absolute.
+2. **Command-scaled observation** (`--rel-obs`, trial 79): obs divided by `MAX_SPEED` leaves a
+   0.5 m/s hover error at 0.01, and VecNormalize's running std is dominated by fast-band errors.
+   Adding `vel_err / max(|target|, 8)` took hover from 2.01 to 0.74 and 0% to 67% under 1 m/s.
+3. **Speed curriculum in one lineage** (trial 80): `0-18 → 0-25 → 0-34 → 0-45 → 0-50`, then
+   convergence at full envelope. Flat 0–50 training plateaued at 4.04; the curriculum reached
+   2.97 with 25% <1. Widening the envelope costs precision monotonically — measured within one
+   lineage as 1.77 → 2.78 → 3.57 → 3.85.
 
 ### Honest limits
 
-- **The goal is met on 0–18 m/s, not above it.** 18–25 lands at 1.77 median, and 25–34 at 5.73.
-  **34–50 m/s is not covered by any trained policy** — trims exist there (verified within
-  actuator limits), but no policy flies it. The goal envelope moved 0–25 → 0–45 → 0–50 m/s during
-  the campaign; the numbers above are the honest state against the widest of those.
-- **One wide-range policy was never achieved.** The deliverable is four band specialists plus a
-  routing rule. Trial 70 identifies a concrete, quantified reason (reward scale) and implements a
-  fix, but it was **never trained**, so single-policy feasibility remains open rather than
-  refuted.
-- **Tail statistics are seed-sensitive at n≈100/band.** The same armed/disarmed comparison
-  showed p90 rising on the seed set the detector was calibrated on and falling on a fresh one.
-  Detector thresholds are selected on seeds 5000+/1000+ (`calib_upset.py`) and the composite
-  scores from 20000+ to keep selection out of sample; per-band numbers should not be read to
-  better than ~10%.
-- **Precision and coverage trade off**, measured: stretching a specialist to 40 m/s degraded
-  its own 25–34 band from 3.77 to 5.30. This is why the system is banded rather than single.
-- **The recovery switch is arming-gated.** The generalist trained to 25 m/s, so arming it above
-  that made recovery *worse* (28% → 5% on the 25–34 band). It is armed only where in-envelope.
+- **The <1 m/s goal is NOT met.** The single policy clears it by median only at hover (0.41) and
+  low (0.56); mid 1.25, high 2.28, vhigh 5.58, top 9.79 do not. No band reaches the
+  85%-of-episodes bar, though hover (83%) and low (81%) sit at its edge. The goal envelope moved
+  0–25 → 0–45 → 0–50 m/s during the campaign; these numbers are against the widest.
+- **The fast bands are the whole remaining gap**, and the lineage plateaued there: convergence
+  stages went 3.07 → 3.22 → 2.97 with overlapping CIs. More stages of the same recipe will not
+  close it; a new mechanism is needed.
+- **Descents are the specific unfixed weakness.** On the single policy, descents cost 9.55 vs
+  climbs 2.87 (3.3×), with a +15.9 m/s vertical undershoot at γ=−40. Steep descents at 35–50 m/s
+  need 93–105° of tilt while the action space caps commanded tilt at 80° — a measured mismatch
+  whose consequence is **untested**: one attempt to lift the cap failed for an unrelated reason
+  (trial 78, resolution loss) and the corrected attempt (trial 81) was stopped before any result.
+- **Single seed everywhere in trials 77–81.** The %<1 improvements are large enough to trust
+  directionally; individual median differences of ~10% are not.
+- **Precision and coverage trade off**, now measured inside one lineage: 1.77 (0–25) → 2.78
+  (0–34) → 3.57 (0–45) → 3.85 (0–50).
+- **The composite is still more precise on 0–34** (1.22 vs 1.51, 44% vs 37% <1), so the single
+  policy is the better *system* (one net, wider coverage) but not the more accurate one there.
+- **Trial 74's three-seed replication of the basin reward is incomplete** — one fresh seed
+  finished, one never ran. Do not cite the basin mechanism as replicated.
+- **A known bug affects trial 69's detector description**: `recovery_switch.expected_tilt`
+  compared radians to degrees and always returned the ±40° trim column. Fixed 2026-08-08, but the
+  recovery-switch numbers have not been re-derived under the fix — they are self-consistent
+  (calibration and scoring used the same function) but the "trim-relative" framing is unverified.
 - Recovery is measured from synthetic failure-state starts in simulation; no hardware, and no
   sim-to-real transfer is claimed.
 
@@ -65,13 +91,22 @@ So it is **net beneficial with real per-episode variance** — not free, and not
   infeasible trims. (An earlier note in this project claimed 60 m/s "needs −21° elevator, so it
   isn't flyable" — that was wrong for exactly this reason.) Level flight at 50 m/s needs 134 N of
   the 440 N available.
-- **The wide-range failure is a reward-scaling artifact, not capacity or interference** (trial
-  70, analysis only): all velocity reward terms have absolute widths, so the shaped gradient at
-  an episode's start falls from 1.3e-1 at 5 m/s to **3.9e-22 at 50 m/s**, and the one surviving
-  term is scaled `0.4/MAX_SPEED` — asking for a wider envelope weakens it. This retro-explains
-  why trim-init helped most at speed, why fresh fast-band runs failed, and why more fast-band
-  training always hurt. A scale-invariant approach reward is implemented (`--rel-approach`) and
-  **untrained**.
+- **The reward goes numerically dead far from a fast target** (trial 70, analysis only): all
+  velocity reward terms have absolute widths, so the shaped gradient at an episode's start falls
+  from 1.3e-1 at 5 m/s to **3.9e-22 at 50 m/s**, and the one surviving term is scaled
+  `0.4/MAX_SPEED` — asking for a wider envelope weakens it. This governs the far-field
+  **approach** and retro-explains why trim-init helped most at speed and why fresh fast-band runs
+  failed. Tested in **trial 73** (four matched 4M arms on one 0–45 policy): the scale-invariant
+  `basin` arm was promoted — worst-band median 18.93 vs legacy 32.48 — but **all arms scored 0%
+  of episodes below 1 m/s**, so the mechanism is real and far from sufficient. Its three-seed
+  replication (trial 74) is **incomplete**: one fresh seed finished, one never ran.
+- **The fast-band residual is a DESCENT asymmetry, not a speed limit** (trial 75, analysis only).
+  At matched speed, descents cost 1.3× (low) to **4.2× (25–34 m/s)** more error than climbs,
+  replicated across all four bands — and since targets are sampled uniformly on the sphere, half
+  of every band's commands are descents. It is a **stabilization** failure: started *in* a
+  commanded descent the policy departs from it (6.83×). Eliminated along the way: physics
+  (per-draw trim infeasible ~0%), thrust floor (bites only at γ≤−30), required trim tilt (2.08×
+  spread at constant tilt), and settling time (20 s episodes give a *wider* gap).
 - **Goal-state initialization (trim-init)**: starting a fraction of training episodes at
   the target velocity in near-trim attitude was the single biggest gain at speed.
 - **Attitude-setpoint action space**: the wing-borne trim is dynamically unstable; letting
@@ -116,7 +151,15 @@ python continue_train.py --src results_velyaw_run1 --out results_velyaw_run1b \
 
 python analyze_velyaw.py --dir results_velyaw_run1b # physical eval + recovery + traces
 
-# the full system: route by commanded speed, generalist armed for upset recovery
+# THE DELIVERABLE: one policy over 0-50 m/s (trial 80 recipe, curriculum in one lineage)
+python train.py --xwing-aero --yaw-bias 0.3 --speed-min 0 --max-speed 18 --wind-max 15     --yaw-gate --yaw-att-gate --vel-precision 0.7 --cov-width 5 --ent-coef 0.003     --trim-init 0.2 --att-cmd --rel-basin 1.0 --rel-obs     --timesteps 8000000 --out-dir run_a
+# then continue with a growing envelope: 25 -> 34 -> 45 -> 50, +8M each at lr 1e-4,
+# resuming from the previous stage's worst-band `envelope_best` bundle once it exists:
+python continue_train.py --src run_a --out run_b --extra 8000000 --lr 1e-4     --max-speed-override 25 --source-checkpoint final
+python select_envelope_checkpoint.py --dir run_b --episodes-per-band 6   # only valid at >=45
+# finally converge at the full envelope for several more +8M stages.
+
+# the older composite system: route by commanded speed, generalist armed for upset recovery
 python eval_composite.py --episodes 400 --upsets 60 --recovery
 ```
 
@@ -128,7 +171,7 @@ python eval_composite.py --episodes 400 --upsets 60 --recovery
 | `aero_xwing.py` | ported XWing aerodynamic model (byte-faithful) |
 | `train.py` / `continue_train.py` / `train_lstm.py` | training entry points |
 | `eval_velyaw.py` / `analyze_velyaw.py` / `eval_inflight.py` | evaluation (distribution metrics, dive-recovery, hold-from-trim diagnostic) |
-| `eval_composite.py` | the deliverable: band routing + optional recovery mode, precision AND recovery columns |
+| `eval_composite.py` | the OLDER composite system: band routing + optional recovery mode (superseded as the deliverable by the single policy, trial 80) |
 | `recovery_switch.py` / `eval_recovery_switch.py` | supervisory upset-recovery switch (routing rule over two trained nets) |
 | `calib_upset.py` / `diag_upset_terms.py` | detector threshold calibration and per-term false-fire attribution |
 | `classical_baseline.py` | hand-tuned cascade used as a diagnostic ceiling probe |

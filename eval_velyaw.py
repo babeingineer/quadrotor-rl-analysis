@@ -8,6 +8,7 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from rate_vel_aviary import RateVelAviary
+from checkpoint_utils import resolve_checkpoint
 
 
 class _Predictor:
@@ -34,6 +35,7 @@ def env_kwargs(cfg, ep_len=10.0, **overrides):
     always rebuilt with the interface/scaling it was trained on."""
     kw = dict(episode_len_sec=ep_len, max_speed=cfg.get("max_speed", 25.0),
               speed_min=cfg.get("speed_min", 0.0),
+              target_speed_max=cfg.get("target_speed_max", None),
               wind_max=cfg.get("wind_max", 20.0),
               use_wind_est=cfg.get("use_wind_est", True),
               use_vel_integral=cfg.get("use_integral", True),
@@ -46,7 +48,12 @@ def env_kwargs(cfg, ep_len=10.0, **overrides):
               yaw_gate=cfg.get("yaw_gate", False),
               yaw_gate_floor=cfg.get("yaw_gate_floor", 0.2),
               vel_precision=cfg.get("vel_precision", 0.0),
+              att_tilt_max=cfg.get("att_tilt_max", 0.0),
+              att_tilt_ext=cfg.get("att_tilt_ext", 0.0),
+              rel_obs=cfg.get("rel_obs", False),
               rel_approach=cfg.get("rel_approach", 0.0),
+              rel_basin=cfg.get("rel_basin", 0.0),
+              cmd_linear=cfg.get("cmd_linear", False),
               rel_width=cfg.get("rel_width", 0.5),
               rel_floor=cfg.get("rel_floor", 8.0),
               yaw_att_gate=cfg.get("yaw_att_gate", False),
@@ -71,28 +78,32 @@ def env_kwargs(cfg, ep_len=10.0, **overrides):
     return kw
 
 
-def load(D, ep_len=10.0, **overrides):
+def load(D, ep_len=10.0, checkpoint="auto", model_file=None, vecnormalize_file=None,
+         **overrides):
     cfg = json.load(open(f"{D}/config.json"))
     kw = env_kwargs(cfg, ep_len, **overrides)
     venv = DummyVecEnv([lambda: RateVelAviary(**kw)])
-    venv = VecNormalize.load(f"{D}/vecnormalize.pkl", venv)
+    model_path, norm_path, _ = resolve_checkpoint(
+        D, checkpoint=checkpoint, model_file=model_file,
+        vecnormalize_file=vecnormalize_file)
+    venv = VecNormalize.load(norm_path, venv)
     venv.training = False; venv.norm_reward = False
     recurrent = cfg.get("algo") == "recurrent_ppo"
-    mp = f"{D}/best/best_model.zip"
-    if not os.path.exists(mp):
-        mp = f"{D}/ppo_ratevel_final.zip"      # fallback (e.g. smoke runs with no eval yet)
     if recurrent:
         from sb3_contrib import RecurrentPPO
-        model = RecurrentPPO.load(mp, device="cpu")
+        model = RecurrentPPO.load(model_path, device="cpu")
     else:
-        model = PPO.load(mp, device="cpu")
+        model = PPO.load(model_path, device="cpu")
     base = venv.venv.envs[0].unwrapped
     return _Predictor(model, recurrent), venv, base
 
 
-def evaluate(D, n=120, ep_len=10.0, steady_window=3.0, **overrides):
+def evaluate(D, n=120, ep_len=10.0, steady_window=3.0, checkpoint="auto",
+             model_file=None, vecnormalize_file=None, **overrides):
     """Steady-state = mean over the final `steady_window` seconds of each episode."""
-    model, venv, base = load(D, ep_len, **overrides)
+    model, venv, base = load(
+        D, ep_len, checkpoint=checkpoint, model_file=model_file,
+        vecnormalize_file=vecnormalize_file, **overrides)
     dt = base.CTRL_TIMESTEP; N = int(ep_len / dt); k0 = N - int(steady_window / dt)
     rows = []
     for i in range(n):
@@ -157,6 +168,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default="results_velyaw_xwaero")
     ap.add_argument("--episodes", type=int, default=120)
+    ap.add_argument("--checkpoint", choices=("auto", "best", "final", "legacy-best"),
+                    default="auto", help="reproducible pair to evaluate; auto uses paired best "
+                    "when present, otherwise the final pair")
+    ap.add_argument("--model-file", default=None)
+    ap.add_argument("--vecnormalize-file", default=None)
     args = ap.parse_args()
     print(f"########## {args.dir} ##########")
-    report(evaluate(args.dir, n=args.episodes))
+    report(evaluate(args.dir, n=args.episodes, checkpoint=args.checkpoint,
+                    model_file=args.model_file,
+                    vecnormalize_file=args.vecnormalize_file))

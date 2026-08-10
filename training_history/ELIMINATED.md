@@ -3,6 +3,12 @@
 Consolidated so nothing here gets re-tested. Every row was a controlled test against a stated
 baseline, not an impression. Where a number is missing I say so rather than inventing one.
 
+**Critical correction (trial 72):** continuation applied range/integral overrides after building
+the environment arguments. Trials 63, 65, and 66 therefore did not train on their claimed changed
+spans, and trial 61 received only one 8M stage of actual split-integral dynamics. Their earlier
+“closed/refuted” labels are retracted below. See
+[72_training_integrity_fixes.md](72_training_integrity_fixes.md).
+
 **Read this with [70_reward_scale_invariance.md](70_reward_scale_invariance.md) in mind.** Several
 rows below ran on a reward whose shaped gradient at speed is ~1e-6 to 1e-22. Two distinct
 situations, and they deserve different weight — both marked ⚠:
@@ -42,7 +48,7 @@ situations, and they deserve different weight — both marked ⚠:
 | True integrator (leak τ → ∞) — attempt 1, bundled | 22 | 2.66 mean / 2.08 median vs 0.82 | failed, but 4 variables at once — inconclusive by design |
 | True integrator — isolated | 25 | velocity 0.93 ≈ 0.82 (exonerated) but yaw 90° at γ0.99 | γ was never the yaw driver |
 | Split integral leak (yaw τ decoupled) — fresh lineage | 56 | 6.01 @12M | inconclusive: my design error, launched fresh right after 54 closed fresh training |
-| Split integral leak — on the champion (proper rerun) | 61 | 3.09 → 2.72 [2.25–3.07] vs **2.03**, CIs disjoint after 16M | **CLOSED**: the true-integrator question is settled negative |
+| Split integral leak — on the champion | 61 | stage a trained old τ=3 but evaluated τ=30; stage b reached 2.72 [2.25–3.07] after 8M of actual τ=30 adaptation vs **2.03** | negative at 8M, but the claimed 16M test was false; **REOPENED / not fully resolved** |
 
 ## Control rate and inner loop
 
@@ -76,17 +82,26 @@ situations, and they deserve different weight — both marked ⚠:
 
 | mechanism | trial | result vs baseline | verdict |
 |---|---|---|---|
-| Narrowing the span to the band (25–34) | 63 | 5.06 [4.28–6.45] vs **3.77** | worse |
-| Scaffold-width rule applied at 18–25 (train 14–25) | 65 | 2.48 [2.08–2.88] vs **2.03** | the rule does not transfer down |
-| Scaffold-width rule at 25–34 (train 20–34) | 66 | 5.06 [4.25–6.02] vs **3.77** | refuted in both directions |
+| Narrowing the span to the band (25–34) | 63 | 5.06 [4.28–6.45] vs **3.77**, but training remained 21–34 | **INVALID TEST**: narrowing was written to config/eval but never applied to that training stage |
+| Scaffold-width rule applied at 18–25 (train 14–25) | 65 | 2.48 [2.08–2.88] vs **2.03**, but training remained 18–25 | **INVALID TEST**: width change never entered the training env |
+| Scaffold-width rule at 25–34 (train 20–34) | 66 | 5.06 [4.25–6.02] vs **3.77**, but training remained 21–34 | **INVALID TEST**: width change never entered the training env |
 | Patient low-LR ladder at 18–25 | 64 | 2.10 vs 2.03 | NULL — the band is not step-size limited ⚠ |
-| **Any further training at the fast bands** | 62–66 | every span tried made them worse | ⚠ **the strongest ⚠ row**: with shaped gradient ~1e-6 there, extra steps optimise the smoothness penalty → "loitering equilibrium" (trials 11–12). Fast-band champions are checkpoints to preserve, not lineages to continue |
+| Further training at the fast bands | 62–66 | extra training from propagated final checkpoints often made them worse, but several claimed span changes never occurred | evidence of drift under the legacy reward, **not** evidence that every span or continuation from a paired best checkpoint fails |
+
+## Action-interface changes (single-policy campaign, trials 77-81)
+
+| mechanism | trial | result vs baseline | verdict |
+|---|---|---|---|
+| Full-sphere attitude command (`att_tilt_max=120`, linear \|xy\|→tilt) | 78 | **14.90 vs xw77's 4.25** at 32M; hover 3.7x worse, low 4.3x worse | **REFUTED** — rescaling the map halves resolution everywhere. The 80 deg cap is real, but this way of lifting it is strictly harmful. Any retry must preserve low-tilt resolution |
+| Command-scaled velocity-error obs (`rel_obs`) | 79 | pooled neutral (4.17 vs 4.25) BUT hover **2.01 → 0.74, 0% → 67% <1**, low 2.08 → 1.45 | **ADOPTED** — mechanism confirmed at the slow end; the pooled median averaged it away. Fast bands ~10% worse, within single-seed noise |
+| Resolution-preserving tilt extension (`att_tilt_ext=120`) | 81 | — | **NOT RUN** (stopped by directive). Cap hypothesis remains untested |
 
 ## Teacher / hybrid approaches
 
 | mechanism | trial | result vs baseline | verdict |
 |---|---|---|---|
-| PID-teacher distillation | — | teacher itself is worse than RL above 18 m/s | cannot distil a worse policy into a better one |
+| PID-teacher **distillation** | — | teacher itself is worse than RL above 18 m/s | cannot distil a worse policy into a better one |
+| PID-teacher **initialisation** (BC-init, then RL) | 76 | head-to-head on one stratified γ protocol: descents mid **4.15 vs RL 1.83**, vhigh **16.19 vs RL 10.16**; climbs also worse | **refuted separately from distillation** — a genuinely different proposal (bootstrap, not final answer), but the teacher is worse than the student at every band/direction tested, so BC-init starts BELOW where RL converges. Caveat: the teacher IS 3.8× more precise at mid on the ~60% of draws where its fixed gains stay stable |
 | Residual RL | — | rejected by user constraint (*"i don't want residual RL. i want full RL"*) | not tested |
 | Trim feedforward (`trim_ff`, deployable variant) | 67, 68 | **cancelled by user** mid-run (*"i don't need trim. i need only pure RL."*) | implemented, left default OFF, never evaluated |
 
@@ -114,3 +129,20 @@ The diagnosis that worked every time is per-step reward accounting of the observ
 the desired one. Trial 70 adds a corollary: **also evaluate the reward numerically at the edges
 of the commanded range** — six trials blamed capacity, memory, or interference before anyone
 checked whether the objective was still finite out there.
+
+## Descent-asymmetry mechanism hunt (trial 71, evaluation only — no training)
+The fast-band residual turned out to be a descent/climb asymmetry (up to 4.2× at matched speed,
+all four bands). Five candidate causes, all eliminated by measurement:
+
+| candidate | test | verdict |
+|---|---|---|
+| Physically infeasible commands | re-solve trim per DR draw (±20% aero, mass 13.6–14.1) | **refuted** — infeasible ~0% at every (V, γ) |
+| Thrust floor at descent (T≥0 boundary) | per-draw throttle-at-floor rate | **refuted as primary** — 17–42% at γ=−40 but 0% at γ=−20, which predicts a cliff; measured profile is a smooth ramp, and level flight (4.88) is 2× harder than a +40° climb (2.02) with 90–137 N margin at both |
+| Required trim tilt ("error doubles every 16°") | within-policy low band, where tilt is constant 2.4–3.9° across all nine angles | **refuted** — 2.08× error spread at constant tilt. The +0.774 correlation was worthless: tilt is monotone in both speed and γ, so beating each marginal is near-automatic, and the tilt values themselves are solver noise (non-monotonic in γ at V=16) |
+| Settling time from a hover start | 20 s vs 8 s episodes | **refuted** — gap slightly WIDER at 20 s (4.8× vs 4.2×) |
+| Entry (can't get into a descent) | trim-start hold test (start AT the commanded velocity) | **refuted → it is STABILIZATION**: 6.83× gap when placed in the state, worse than from rest |
+
+Untested candidate left standing: a **learned aversion to descending**, installed by the early
+anti-dive work (trials 01–04, where the yaw gate destroyed a dive attractor and delivered the
+campaign's biggest single win). Consistent with the policy *departing* a feasible, better-paying
+descent, but separating it from "descents are simply harder to stabilize" requires training.

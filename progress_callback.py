@@ -9,6 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
+from checkpoint_utils import save_vecnormalize_atomic, write_checkpoint_manifest
 
 
 class DiveCurriculumCallback(BaseCallback):
@@ -50,12 +51,27 @@ class ProgressPlotCallback(EvalCallback):
         os.makedirs(self.progress_dir, exist_ok=True)
 
     def _on_step(self):
+        best_before = self.best_mean_reward
         try:
             self.eval_env.obs_rms = self.model.get_vec_normalize_env().obs_rms
         except Exception:
             pass
         n_before = len(self.evaluations_timesteps) if self.evaluations_timesteps else 0
         out = super()._on_step()
+        if self.best_mean_reward > best_before and self.best_model_save_path is not None:
+            # EvalCallback just saved best_model.zip. Persist the normalization state from the
+            # same training timestep and write the manifest last to make a reproducible bundle.
+            best_dir = self.best_model_save_path
+            model_path = os.path.join(best_dir, "best_model.zip")
+            norm_path = os.path.join(best_dir, "vecnormalize.pkl")
+            train_norm = self.model.get_vec_normalize_env()
+            if train_norm is None:
+                raise RuntimeError("best checkpoint cannot be paired: no VecNormalize env")
+            save_vecnormalize_atomic(train_norm, norm_path)
+            write_checkpoint_manifest(
+                best_dir, model_path, norm_path, self.num_timesteps,
+                mean_reward=self.best_mean_reward,
+                config_path=os.path.join(self.out_dir, "config.json"))
         n_after = len(self.evaluations_timesteps) if self.evaluations_timesteps else 0
         if n_after > n_before:
             step = int(self.num_timesteps)

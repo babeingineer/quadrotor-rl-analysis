@@ -108,10 +108,16 @@ def _trim_ref():
 
 
 def expected_tilt(target_vel):
-    """Tilt the aircraft SHOULD hold to fly the commanded velocity."""
+    """Tilt the aircraft SHOULD hold to fly the commanded velocity.
+
+    UNITS BUG FIXED 2026-08-08: `ga` (the trim table's gammas) is in RADIANS, but gamma was
+    computed in DEGREES and compared directly. argmin then always landed on an end column —
+    the -40 deg trim for ANY descent and the +40 deg trim for ANY climb — so a level 30 m/s
+    command reported 93 deg of expected tilt instead of ~54. Both stay in radians now.
+    """
     sp, ga, t = _trim_ref()
     speed = float(np.linalg.norm(target_vel))
-    gamma = np.degrees(np.arcsin(np.clip(target_vel[2] / max(speed, 1e-6), -1.0, 1.0)))
+    gamma = float(np.arcsin(np.clip(target_vel[2] / max(speed, 1e-6), -1.0, 1.0)))   # radians
     j = int(np.argmin(np.abs(ga - gamma)))
     return float(np.interp(speed, sp, t[:, j]))
 

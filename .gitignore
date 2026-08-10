@@ -8,6 +8,10 @@ results_*/
 *.sh
 *.done
 *.npz
+xw73_status.json
+xw73_summary.json
+xw74_status.json
+xw74_summary.json
 
 # trained models / normalization stats / replay buffers
 *.zip
