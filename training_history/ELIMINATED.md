@@ -94,7 +94,17 @@ situations, and they deserve different weight — both marked ⚠:
 |---|---|---|---|
 | Full-sphere attitude command (`att_tilt_max=120`, linear \|xy\|→tilt) | 78 | **14.90 vs xw77's 4.25** at 32M; hover 3.7x worse, low 4.3x worse | **REFUTED** — rescaling the map halves resolution everywhere. The 80 deg cap is real, but this way of lifting it is strictly harmful. Any retry must preserve low-tilt resolution |
 | Command-scaled velocity-error obs (`rel_obs`) | 79 | pooled neutral (4.17 vs 4.25) BUT hover **2.01 → 0.74, 0% → 67% <1**, low 2.08 → 1.45 | **ADOPTED** — mechanism confirmed at the slow end; the pooled median averaged it away. Fast bands ~10% worse, within single-seed noise |
-| Resolution-preserving tilt extension (`att_tilt_ext=120`) | 81 | — | **NOT RUN** (stopped by directive). Cap hypothesis remains untested |
+| **The 80° tilt cap as the descent cause** | **83** | RATE interface has NO attitude parameterisation and therefore no cap, yet descents/climbs = **3.6×** vs the capped attitude policy's 3.3×, and descents are worse in absolute terms (14.64 vs 9.55) | **REFUTED — definitively.** Two dedicated attempts (78, 81) failed for implementation reasons; this tested it for free by removing the parameterisation entirely. **Stop doing interface surgery for descents.** |
+| Rate interface (CTBR) vs attitude, modern recipe | 83 | 3.16 [2.36–4.18] vs 2.97 [2.54–3.77]; tied at every stage | **NOT refuted — a genuine TIE.** The interface was never the bottleneck; trial 32's attitude win was measured against a pre-reward-fix baseline. Attitude retains %<1, yaw and descents, so it stays the deliverable |
+| Resolution-preserving tilt extension (`att_tilt_ext=120`), warm-started | 81 | 7.53 → 5.72 → **5.26** over 22M vs xw80_h's **2.97**; worse in every band; descent/climb ratio **3.1× vs 3.3× — unchanged** | **FAILURE as an approach**: you cannot change action semantics mid-lineage and warm-start. \|xy\|=0.95 went from 72° to 92° of tilt, so a third of the policy's commands became large over-tilts (sank 28 m/s when told to fly level). The **tilt-cap hypothesis itself remains UNTESTED** — a fair test needs a fresh ~64M lineage with the extension from step zero |
+
+## Single-policy plateau attacks (trials 84-86)
+
+| mechanism | trial | result vs baseline | verdict |
+|---|---|---|---|
+| Strong-wind oversampling (0.5) | 84 | 2.90 then 3.13 vs **2.97**; flat over two stages | **REFUTED** — most residual error is in the 10-15 m/s wind bin (4.80, only 11% <1), but oversampling those draws does not make them easier. Exposure again fails to beat a structural limit (cf. trial 03) |
+| Capacity 512×512, modern recipe | 85 | stage b (0-25) **3.51 / 11%** vs the 256-wide lineage's **1.77 / 26%** at the identical point | **not promising** — 2× behind at matched budget; incomplete (spawn crash), resumable. With trial 11 this makes capacity an unlikely lever |
+| Seed reproduction of the xw80 recipe | 86 | stage e **3.62 [2.88-4.82] / 21%** vs seed 0's **3.85 / 21%** | **REPRODUCES at stage e** — recipe is not a lucky draw. But seed 2's convergence stages died, so the headline **2.97 remains single-seed** |
 
 ## Teacher / hybrid approaches
 

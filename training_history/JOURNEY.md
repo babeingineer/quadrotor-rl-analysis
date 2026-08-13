@@ -6,11 +6,13 @@ trial 10, **0–15 m/s (real spec) from trial 11**. The headline system was the 
 specialists routed by commanded speed) from trial 59, and is the **single 0–50 policy** from
 trial 80 onward. All numbers under full DR.
 
-**FINAL STATE (2026-08-10, campaign stopped by user directive).**
+**CURRENT STATE (2026-08-14, campaign ACTIVE — autonomy restored 08-13).**
 
-The deliverable is now a **SINGLE policy over 0–50 m/s** (`results_velyaw_xw80_h`, 64M steps in
-one lineage), which supersedes the four-specialist composite as the system, though not as the
-most precise thing on 0–34.
+The deliverable is a **SINGLE policy over 0–50 m/s**, currently **`results_velyaw_xw87_c`**
+(xw80_h + 16 s episodes): pooled **2.62 [2.06–3.32] / 25% <1** @8 s protocol — hover 0.35 (83%),
+low 0.46 (81%), mid 1.37, high 1.84, vhigh 4.63, top 7.09. It supersedes xw80_h (2.97), whose
+numbers below stand as the 8 s-era reference. In flight: xw88 (more 16 s stages) and xw86
+(seed-2 convergence).
 
 | band | single policy | composite specialist |
 |---|---|---|
@@ -47,8 +49,21 @@ change must preserve that.
 
 **What is left.** The fast bands, and specifically **descents**: 9.55 vs 2.87 for climbs (3.3×),
 +15.9 m/s undershoot at γ=−40. Steep descents at 35–50 m/s need 93–105° of tilt against an 80°
-cap. The corrected interface fix (81) was stopped before producing any result, so that hypothesis
-is **untested, not supported**.
+cap.
+
+**Trial 81 tried to lift that cap and FAILED — for a reason worth remembering.** The mapping
+change was carefully resolution-preserving (legacy `arcsin` kept bit-for-bit below |xy|=0.9), but
+it was **warm-started** from xw80_h, and above 0.9 the same action now meant something else:
+|xy|=0.95 went from commanding 72° of tilt to 92°. The policy issues commands in that region
+about a third of the time, so a third of its behaviour instantly became a large over-tilt — told
+to fly level, the aircraft sank at 28 m/s. Twenty-two million steps of re-adaptation got it from
+7.53 to 5.26, still far behind the 2.97 it started from, and **the descent/climb ratio was
+unchanged (3.1× vs 3.3×)**.
+
+Two interface attacks (78, 81) have now failed for *implementation* reasons rather than the
+hypothesis. **The tilt-cap question is still open**, and a fair test needs a fresh ~64M lineage
+with the extension from step zero — not a continuation. General lesson: **action semantics are
+not a continuation-safe knob**, unlike reward weights or the training distribution.
 
 ## The scoreboard
 
@@ -335,3 +350,22 @@ currently stopped.
 
 Method lesson: **stratify the evaluation before theorising.** Forty trials optimised a median
 that was averaging over a 4× asymmetry nobody had measured.
+
+
+## ★ 2026-08-13 — the plateau breaks: episode length was the binding protocol variable
+After four failed attacks on the ~3 m/s plateau (wind oversampling null, capacity behind, rate
+interface tie, tilt cap refuted), the one that worked cost nothing new: **16 s episodes instead
+of 8**, continuing the same lineage (xw87). Pooled 2.97 → **2.62 [2.06–3.32]** @8 s protocol,
+with the gain concentrated exactly where the settling hypothesis predicted — **top 35–45 fell
+9.79 → 7.09 (−28%)**, vhigh −17%, high −19%, while hover/low also improved (0.35 / 0.46).
+
+Why it makes sense: at 45 m/s an 8 s episode is nearly all transition — the policy barely
+experiences the settled regime it is being scored on. Longer episodes deliver the same exposure
+trim-init delivered (trial 27), through the protocol instead of the initial state. And unlike
+action semantics (trial 81), episode length is continuation-safe.
+
+Also that day: the seed-2 reproduction (xw86) matched seed 0 at the stage-e checkpoint
+(3.62/21% vs 3.85/21%) — the recipe is not a lucky draw, though the converged number is still
+being reproduced. Meanwhile the infrastructure lesson was paid for again: a zombie process that
+survived a failed TaskStop retrained a finished stage for two hours and its RAM footprint killed
+the legitimate convergence run's spawns. Verify kills by process list, never by tool return.
